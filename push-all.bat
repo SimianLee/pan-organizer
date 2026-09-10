@@ -11,15 +11,16 @@ rem    push-logs\push-<时间戳>.log   本次完整日志（git 原始输出 + 
 rem    push-logs\history.log         历次推送一行摘要（追加式）
 rem
 rem  说明：
-rem    - 三个远程都走 HTTPS：首次推送会弹凭据窗口，输一次就会记住
-rem      （gitcode 需要在网页上生成私人令牌，登录时密码填令牌）
-rem    - 脚本幂等：远程已存在就跳过配置，重复运行没副作用
+rem    - gitcode 走 SSH；gitee / github 走 HTTPS（首次推送弹凭据窗口，输一次就记住）
+rem    - 脚本幂等：重复运行没副作用，远程地址与脚本不一致时自动纠正
 rem ============================================================
 setlocal enabledelayedexpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
-set "GITCODE_URL=https://gitcode.com/SimianLee/pan-organizer.git"
+rem    - gitcode 走 SSH（该平台已禁用密码认证，HTTPS 必须用私人令牌）
+set "GITCODE_URL=git@gitcode.com:SimianLee/pan-organizer.git"
+rem    - gitee / github 走 HTTPS：首次推送会弹凭据窗口，输一次就会记住
 set "GITEE_URL=https://gitee.com/SimianLee/pan-organizer.git"
 set "GITHUB_URL=https://github.com/SimianLee/pan-organizer.git"
 
@@ -41,6 +42,10 @@ if errorlevel 1 (
 git remote get-url gitee   >nul 2>&1 || git remote add gitee   "%GITEE_URL%"
 git remote get-url gitcode >nul 2>&1 || git remote add gitcode "%GITCODE_URL%"
 git remote get-url github  >nul 2>&1 || git remote add github  "%GITHUB_URL%"
+rem 远程已存在但地址与脚本不一致时，自动纠正（幂等）
+git remote set-url gitee   "%GITEE_URL%"   2>nul
+git remote set-url gitcode "%GITCODE_URL%" 2>nul
+git remote set-url github  "%GITHUB_URL%"  2>nul
 
 for /f "delims=" %%b in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%b"
 for /f "delims=" %%c in ('git rev-parse --short HEAD') do set "COMMIT=%%c"
