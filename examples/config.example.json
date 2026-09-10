@@ -1,0 +1,12 @@
+{
+  "alist": {
+    "base_url": "http://192.168.1.100:5244/dav",
+    "username": "你的alist登录用户名",
+    "password": "你的alist登录密码",
+    "timeout": 30
+  },
+  "options": {
+    "on_conflict": "skip",
+    "exclude_dirs": []
+  }
+}

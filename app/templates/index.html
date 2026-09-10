@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>pan-organizer · 网盘自动整理</title>
+<!-- 样式库：优先用镜像内置的本地副本。
+     本工具跑在内网 NAS 上，浏览器很可能出不了外网——那时从 CDN 拉样式会失败，
+     页面会退化成"裸 HTML"。内置之后离线也能正常显示。
+     万一本地副本缺失或被拦截，下面会在页面加载完成后自动回落到官方 CDN。 -->
+<script src="/static/vendor/tailwind.js"></script>
+<script>
+  window.addEventListener("load", function () {
+    var applied = false;
+    document.querySelectorAll("style").forEach(function (s) {
+      if (s.textContent && s.textContent.indexOf("tailwindcss v") >= 0) applied = true;
+    });
+    if (!applied) {
+      var t = document.createElement("script");
+      t.src = "https://cdn.tailwindcss.com";
+      document.head.appendChild(t);
+    }
+  });
+</script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
+                    "Microsoft YaHei", sans-serif; }
+  pre.log { font-family: "JetBrains Mono", Consolas, Monaco, monospace;
+            font-size: 12px; line-height: 1.5;
+            white-space: pre-wrap; word-break: break-all; }
+  /* 激活标签：必须有 .tab-btn 前缀抬高特异性。
+     Tailwind 的 <style> 是脚本注入的，位置排在我们这段之后；
+     按钮上自带的 border-transparent 和这里的 .tab-active 特异性相同（都是 1 个类），
+     后出现的 border-transparent 会把颜色盖回去 —— 结果就是蓝色下划线一直不显示。
+     写成 .tab-btn.tab-active（2 个类）就不受注入顺序影响了。 */
+  .tab-btn.tab-active { border-bottom-color: #2563eb; color: #2563eb; }
+  .tree-item { cursor: pointer; padding: 2px 8px;
+                border-radius: 4px; user-select: none; }
+  .tree-item:hover { background: #f1f5f9; }
+  .tree-item.selected { background: #dbeafe; color: #1d4ed8;
+                         font-weight: 500; }
+  .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+  .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: #cbd5e1;
+                                            border-radius: 4px; }
+  .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+  /* 进度条：扫描阶段无总量 → 不确定态流动条；执行阶段显示精确百分比 */
+  #progBar.indet { width: 35%; animation: prog-indet 1.1s ease-in-out infinite; }
+  @keyframes prog-indet {
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(400%); }
+  }
+  /* 历史恢复 / 异常中断：静态短条 + 警示色（避免误以为正在跑） */
+  #progBar.prog-amber { background-color: #f59e0b; }   /* amber-500 */
+</style>
+</head>
+<body class="bg-slate-50 min-h-screen">
+<div class="max-w-7xl mx-auto p-4">
+
+  <!-- 顶部标题栏 -->
+  <header class="bg-white rounded-lg shadow-sm p-4 mb-4 flex items-center
+                  justify-between">
+    <div>
+      <h1 class="text-2xl font-bold text-slate-800">pan-organizer · 网盘自动整理</h1>
+      <p class="text-xs text-slate-500 mt-1">通过 Alist WebDAV 整理百度网盘等存储</p>
+    </div>
+    <div id="statusBar" class="text-sm flex items-center gap-3">
+      <span class="px-3 py-1 rounded-full bg-slate-200 text-slate-700">
+        状态: <span id="statusText">空闲</span>
+      </span>
+      <span class="text-xs text-slate-400" title="版本号">v{{ app_ver }}</span>
+    </div>
+  </header>
+
+  <!-- 标签栏 -->
+  <div class="bg-white rounded-t-lg shadow-sm border-b border-slate-200">
+    <nav class="flex">
+      <button data-tab="connect" class="tab-btn px-4 py-3 border-b-2
+              border-transparent hover:text-blue-600">① 连接</button>
+      <button data-tab="paths" class="tab-btn px-4 py-3 border-b-2
+              border-transparent hover:text-blue-600">② 路径</button>
+      <button data-tab="rules" class="tab-btn px-4 py-3 border-b-2
+              border-transparent hover:text-blue-600">③ 规则</button>
+      <button data-tab="run" class="tab-btn px-4 py-3 border-b-2
+              border-transparent hover:text-blue-600">④ 执行与日志</button>
+    </nav>
+  </div>
+
+  <main class="bg-white rounded-b-lg shadow-sm p-6 mb-4">
+
+    <!-- ============== 标签 1：连接配置 ============== -->
+    <section data-pane="connect">
+      <h2 class="text-lg font-semibold text-slate-800 mb-4">alist 连接配置</h2>
+      <form id="cfgForm" class="space-y-3 max-w-xl">
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            alist WebDAV 地址
+          </label>
+          <input type="text" name="base_url" id="f_base_url"
+                 class="w-full px-3 py-2 border border-slate-300 rounded-md
+                        focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                 placeholder="http://192.168.1.100:5244/dav" />
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">
+              用户名
+            </label>
+            <input type="text" name="username" id="f_username"
+                   class="w-full px-3 py-2 border border-slate-300 rounded-md
+                          focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                   placeholder="alist 登录账号" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-700 mb-1">
+              密码 <span id="pwdSetBadge"
+                          class="hidden text-xs text-green-600 ml-1">
+                ✓ 已设置
+              </span>
+            </label>
+            <input type="password" name="password" id="f_password"
+                   class="w-full px-3 py-2 border border-slate-300 rounded-md
+                          focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                   placeholder="留空保持原密码" />
+          </div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-1">
+            请求超时（秒）
+          </label>
+          <input type="number" name="timeout" id="f_timeout"
+                 class="w-32 px-3 py-2 border border-slate-300 rounded-md
+                        focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                 value="30" min="5" max="600" />
+        </div>
+        <div class="flex gap-2 pt-2">
+          <button type="button" id="btnTest"
+                  class="px-4 py-2 bg-slate-700 hover:bg-slate-800 text-white
+                         rounded-md">
+            测试连接
+          </button>
+          <button type="submit"
+                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white
+                         rounded-md">
+            保存配置
+          </button>
+          <span id="cfgMsg" class="text-sm self-center"></span>
+        </div>
+      </form>
+      <div id="testOut" class="mt-4 hidden">
+        <h3 class="text-sm font-semibold text-slate-700 mb-2">测试输出</h3>
+        <pre class="log bg-slate-900 text-slate-100 p-3 rounded-md
+                    max-h-80 overflow-auto scroll-thin"
+             id="testOutPre"></pre>
+      </div>
+    </section>
+
+    <!-- ============== 标签 2：路径选择 ============== -->
+    <section data-pane="paths" class="hidden">
+      <h2 class="text-lg font-semibold text-slate-800 mb-4">
+        选择要整理的目录与目标目录
+      </h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- 源目录 -->
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-2">
+            源目录 <span class="text-xs text-slate-500">（必填）</span>
+          </label>
+          <div class="flex gap-2 mb-2">
+            <input type="text" id="srcPath"
+                   class="flex-1 px-3 py-2 border border-slate-300 rounded-md
+                          focus:ring-2 focus:ring-blue-500 focus:outline-none
+                          text-sm"
+                   placeholder="/百度网盘-小号/亚马逊电子书" />
+            <button type="button" id="btnSrcBrowse"
+                    class="px-3 py-2 bg-slate-100 hover:bg-slate-200
+                           text-slate-700 rounded-md text-sm">
+              浏览…
+            </button>
+          </div>
+          <div id="srcTree"
+               class="bg-slate-50 border border-slate-200 rounded-md p-2
+                      h-96 overflow-auto scroll-thin text-sm">
+            <p class="text-slate-400 text-center py-8">
+              请先在【① 连接】配置并测试连接
+            </p>
+          </div>
+        </div>
+        <!-- 目标目录 -->
+        <div>
+          <label class="block text-sm font-medium text-slate-700 mb-2">
+            目标目录 <span class="text-xs text-slate-500">（留空则在源目录内按后缀建子夹）</span>
+          </label>
+          <div class="flex gap-2 mb-2">
+            <input type="text" id="dstPath"
+                   class="flex-1 px-3 py-2 border border-slate-300 rounded-md
+                          focus:ring-2 focus:ring-blue-500 focus:outline-none
+                          text-sm"
+                   placeholder="/百度网盘-小号/电子书" />
+            <button type="button" id="btnDstBrowse"
+                    class="px-3 py-2 bg-slate-100 hover:bg-slate-200
+                           text-slate-700 rounded-md text-sm">
+              浏览…
+            </button>
+            <button type="button" id="btnDstClear"
+                    class="px-3 py-2 bg-slate-100 hover:bg-slate-200
+                           text-slate-700 rounded-md text-sm"
+                    title="清空（=在源目录内建子夹）">×</button>
+          </div>
+          <div id="dstTree"
+               class="bg-slate-50 border border-slate-200 rounded-md p-2
+                      h-96 overflow-auto scroll-thin text-sm">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============== 标签 3：规则 ============== -->
+    <section data-pane="rules" class="hidden">
+      <h2 class="text-lg font-semibold text-slate-800 mb-4">
+        整理规则（勾选要启用的）
+      </h2>
+      <div id="rulesList" class="space-y-2">
+        <p class="text-slate-400">加载中…</p>
+      </div>
+
+      <h3 class="text-base font-semibold text-slate-800 mt-6 mb-3">
+        撞名策略（同名文件怎么处理）
+      </h3>
+      <div class="flex flex-wrap gap-x-4 gap-y-2 text-sm">
+        <label class="flex items-center gap-2">
+          <input type="radio" name="on_conflict" value="rename" checked />
+          自动改名 <span class="text-xs text-slate-500">（撞名自动编号 (1)(2)…，原本不受影响，推荐）</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" name="on_conflict" value="skip" />
+          跳过 <span class="text-xs text-slate-500">（撞名不移动，原本不受影响）</span>
+        </label>
+        <label class="flex items-center gap-2">
+          <input type="radio" name="on_conflict" value="overwrite" />
+          覆盖 <span class="text-xs text-red-500">（⚠ 目标同名文件会被替换）</span>
+        </label>
+      </div>
+      <p class="text-xs text-slate-500 mt-2 leading-relaxed">
+        选「覆盖」时不会直接删除原文件：程序先把目标处的同名文件改名为
+        <span class="font-mono text-slate-600">xxx.__bak_时间戳</span> 让位，
+        再移入新文件；成功即自动清理备份，中途失败会自动把原文件改回来，不会丢文件。
+      </p>
+
+      <h3 class="text-base font-semibold text-slate-800 mt-6 mb-3">
+        正则匹配（勾选上方「正则匹配」规则时生效）
+      </h3>
+      <input type="text" id="regexPattern"
+             class="w-full px-3 py-2 border border-slate-300 rounded-md
+                    focus:ring-2 focus:ring-blue-500 focus:outline-none
+                    text-sm"
+             placeholder="正则表达式，如: isbn|第\s*[0-9]+\s*集" />
+      <p class="text-xs text-slate-500 mt-1">
+        勾选「正则匹配」规则后，只整理文件名匹配此正则的文件；留空则不过滤。
+      </p>
+
+      <h3 class="text-base font-semibold text-slate-800 mt-6 mb-3">
+        跳过这些后缀的文件
+      </h3>
+      <input type="text" id="skipExt"
+             class="w-full px-3 py-2 border border-slate-300 rounded-md
+                    focus:ring-2 focus:ring-blue-500 focus:outline-none
+                    text-sm"
+             placeholder="逗号分隔，如: part,crdownload,tmp" />
+      <p class="text-xs text-slate-500 mt-1">
+        默认已跳过: .part .crdownload .downloading .tmp .temp .!qb
+      </p>
+    </section>
+
+    <!-- ============== 标签 4：执行与日志 ============== -->
+    <section data-pane="run" class="hidden">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-lg font-semibold text-slate-800">执行与日志</h2>
+        <div class="flex flex-wrap items-center gap-2">
+          <button id="btnQuery"
+                  title="只扫描并预览整理计划（不移动任何文件），同时生成一份计划供「按计划移动」使用"
+                  class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white
+                         rounded-md font-medium disabled:bg-slate-300">
+            查询(预览)
+          </button>
+          <button id="btnQueryMove"
+                  title="扫描 + 预览 + 直接移动（原来的「开始整理」），并生成一份计划"
+                  class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white
+                         rounded-md font-medium disabled:bg-slate-300">
+            ▶ 查询并移动
+          </button>
+          <span class="text-slate-300">|</span>
+          <select id="planSelect"
+                  title="选择一份查询计划：点「按计划移动」时按它执行，不重复扫描网盘"
+                  class="max-w-[260px] px-2 py-2 border border-slate-300 rounded-md
+                         text-sm bg-white disabled:bg-slate-100"></select>
+          <button id="btnPlanMove"
+                  title="用左侧选中的查询计划直接移动文件，跳过重复扫描（适合查询后确认过再执行）"
+                  class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white
+                         rounded-md font-medium disabled:bg-slate-300"
+                  disabled>
+            按计划移动
+          </button>
+          <button id="btnStop"
+                  class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white
+                         rounded-md font-medium disabled:bg-slate-300"
+                  disabled>
+            ■ 停止
+          </button>
+          <button id="btnClearLog"
+                  class="px-3 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700
+                         rounded-md text-sm">
+            清屏
+          </button>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500 mb-3">
+        查询(预览) = 只扫描出计划不移动；▶ 查询并移动 = 一次到位；按计划移动 = 用左侧选中的
+        <span class="font-mono">plan-*.json</span> 直接移动（不再重复扫描，适合刚查询完确认过再执行）
+      </p>
+
+      <!-- 📋 计划管理：列出所有 plan-*.json + 查看/下载/删除/应用 -->
+      <details id="plansBox"
+               class="mb-3 bg-white border border-slate-200 rounded-md
+                      text-sm group">
+        <summary class="cursor-pointer px-3 py-2 hover:bg-slate-50
+                        flex items-center justify-between">
+          <span class="font-medium text-slate-700">
+            📋 计划管理
+            <span class="text-xs text-slate-500"
+                  id="plansCount">加载中…</span>
+          </span>
+          <span class="text-xs text-slate-400 group-open:hidden">展开 ▾</span>
+          <span class="text-xs text-slate-400 hidden group-open:inline">收起 ▴</span>
+        </summary>
+        <div id="plansList" class="border-t border-slate-200 p-2 space-y-2
+                                    max-h-80 overflow-auto scroll-thin">
+          <p class="text-slate-400 text-center py-4">暂无计划</p>
+        </div>
+      </details>
+
+      <!-- 当前任务信息 -->
+      <div id="runInfo"
+           class="bg-slate-50 border border-slate-200 rounded-md p-3 mb-3
+                  text-sm hidden">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <div>任务：<span id="runLabel" class="font-mono"></span></div>
+          <div>日志文件：<span id="runLogFile"
+                                  class="font-mono text-xs"></span></div>
+          <div>开始时间：<span id="runStarted"></span></div>
+          <div>状态：<span id="runStatus"
+                              class="font-medium"></span></div>
+        </div>
+      </div>
+
+      <!-- 任务进度条 -->
+      <div id="jobProg" class="hidden bg-white border border-slate-200
+                               rounded-md p-3 mb-3 text-sm">
+        <div class="flex items-center justify-between mb-1.5">
+          <span id="progLabel" class="text-slate-600">—</span>
+          <span id="progPct" class="font-mono text-slate-700 font-medium">0%</span>
+        </div>
+        <div class="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+          <div id="progBar" class="bg-blue-600 h-2.5 rounded-full
+                                   transition-all duration-300"
+               style="width:0%"></div>
+        </div>
+      </div>
+
+      <!-- 实时日志 -->
+      <div class="bg-slate-900 rounded-md overflow-hidden">
+        <div class="flex items-center justify-between px-3 py-1
+                    bg-slate-800 text-slate-300 text-xs">
+          <span>实时日志（SSE）</span>
+          <span id="sseStatus" class="text-slate-400">未连接</span>
+        </div>
+        <pre id="logBox" class="log text-slate-100 p-3 h-[420px]
+                                overflow-auto scroll-thin"></pre>
+      </div>
+
+      <!-- 历史日志 -->
+      <div class="mt-4">
+        <details>
+          <summary class="cursor-pointer text-sm font-medium text-slate-700
+                          hover:text-blue-600">
+            历史日志
+          </summary>
+          <div id="historyLogs"
+               class="mt-2 bg-slate-50 border border-slate-200 rounded-md p-3
+                      text-sm space-y-1 max-h-60 overflow-auto scroll-thin">
+            <p class="text-slate-400">加载中…</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="text-center text-xs text-slate-400 py-3">
+    pan-organizer-web v{{ app_ver }} · 局域网工具 · 端口 {{ app_port }}
+  </footer>
+</div>
+
+<script src="/static/app.js?v={{ js_ver }}"></script>
+</body>
+</html>

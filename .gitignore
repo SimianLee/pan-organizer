@@ -1,0 +1,24 @@
+# ---- 运行时数据（唯一挂载点）：会保存真实 alist 凭据，绝不入库 ----
+data/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ---- 测试临时产物（由测试自行创建） ----
+tests/_tmp/
+
+# ---- 推送日志（push-all.bat 生成） ----
+push-logs/
+
+# ---- 日志 ----
+*.log
+
+# ---- 系统 / 编辑器 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/

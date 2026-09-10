@@ -1,0 +1,26 @@
+services:
+  pan-organizer-web:
+    # 构建上下文 = 本目录 (app/)；Docker 镜像内只装运行时需要的代码
+    build: .
+    image: pan-organizer-web:latest
+    container_name: pan-organizer-web
+    restart: unless-stopped
+    ports:
+      - "6060:6060"
+    volumes:
+      # 配置 / 状态 / 日志持久化（重建成容器后页面仍能完整恢复状态）
+      # 包含：data/config.json · data/state.json · data/logs/run-*.log
+      # docker-compose.yml 在 app/，所以 data/ 在 ../data/
+      - ../data:/app/data
+    environment:
+      # 可选：自定义监听端口
+      - PAN_ORGANIZER_PORT=6060
+      - PAN_ORGANIZER_HOST=0.0.0.0
+      # 时区（影响日志时间戳显示）
+      - TZ=Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://localhost:6060/api/health').status)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

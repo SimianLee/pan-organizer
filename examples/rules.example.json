@@ -1,0 +1,59 @@
+{
+  "rules": [
+    {
+      "name": "视频",
+      "match": [{ "type": "ext", "values": ["mp4", "mkv", "avi", "mov", "ts", "flv", "wmv", "rmvb", "webm", "m4v"] }],
+      "action": "move",
+      "target": "/百度网盘/视频"
+    },
+    {
+      "name": "图片",
+      "match": [{ "type": "ext", "values": ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "heic", "tiff"] }],
+      "action": "move",
+      "target": "/百度网盘/图片"
+    },
+    {
+      "name": "文档",
+      "match": [{ "type": "ext", "values": ["doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "txt", "md"] }],
+      "action": "move",
+      "target": "/百度网盘/文档"
+    },
+    {
+      "name": "压缩包",
+      "match": [{ "type": "ext", "values": ["zip", "rar", "7z", "tar", "gz", "bz2", "xz"] }],
+      "action": "move",
+      "target": "/百度网盘/压缩包"
+    },
+    {
+      "name": "音频",
+      "match": [{ "type": "ext", "values": ["mp3", "flac", "wav", "aac", "ogg", "m4a", "wma"] }],
+      "action": "move",
+      "target": "/百度网盘/音频"
+    },
+    {
+      "name": "安装包",
+      "match": [{ "type": "ext", "values": ["exe", "msi", "apk", "dmg", "iso", "deb", "rpm"] }],
+      "action": "move",
+      "target": "/百度网盘/安装包"
+    },
+    {
+      "name": "字幕",
+      "match": [{ "type": "ext", "values": ["srt", "ass", "ssa", "vtt"] }],
+      "action": "move",
+      "target": "/百度网盘/字幕"
+    },
+    {
+      "name": "临时文件",
+      "match": [{ "type": "name_contains", "values": ["临时", "tmp", "temp"] }],
+      "action": "move",
+      "target": "/百度网盘/待清理"
+    },
+    {
+      "name": "超大文件",
+      "match": [{ "type": "size_gt", "mb": 2048 }],
+      "action": "move",
+      "target": "/百度网盘/大文件待处理"
+    }
+  ],
+  "fallback": { "action": "skip" }
+}
