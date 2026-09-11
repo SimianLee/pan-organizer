@@ -13,6 +13,7 @@ rem
 rem  说明：
 rem    - gitcode 走 SSH；gitee / github 走 HTTPS（首次推送弹凭据窗口，输一次就记住）
 rem    - 脚本幂等：重复运行没副作用，远程地址与脚本不一致时自动纠正
+rem    - 执行结束后会停住，提示「按任意键关闭窗口」，不会一闪而过
 rem ============================================================
 setlocal enabledelayedexpansion
 chcp 65001 >nul
@@ -64,14 +65,16 @@ echo 远程列表:
 git remote -v
 echo.
 
+rem 计数器（setup 模式下保持 0，保证退出码有效）
+set /a FAIL=0
+set /a OK=0
+
 if /i "%~1"=="setup" (
     echo [setup] 三个远程已就绪，未执行推送。
     goto :end
 )
 
 rem ---------- 3) 依次推送到三个远程 ----------
-set /a FAIL=0
-set /a OK=0
 for %%r in (gitcode gitee github) do (
     for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format \"yyyy-MM-dd HH:mm:ss\""') do set "T0=%%i"
     echo ============================================
@@ -116,5 +119,16 @@ echo  历史记录:
 powershell -NoProfile -Command "Get-Content '%HIST%' -Tail 5"
 echo ============================================
 
+rem ---------- 5) 结束：停住等按键，避免窗口一闪而过 ----------
 :end
+echo.
+if defined FAIL (
+    if not "%FAIL%"=="0" (
+        echo  提示: gitcode 失败请确认 SSH key 已添加到 gitcode 账号；
+        echo        github 失败请先打开代理再重试（脚本可重复运行，成功的库会跳过）。
+        echo.
+    )
+)
+echo  按任意键关闭窗口...
+pause >nul
 endlocal & exit /b %FAIL%
