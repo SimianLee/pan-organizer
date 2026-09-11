@@ -11,7 +11,9 @@ rem    push-logs\push-<时间戳>.log   本次完整日志（git 原始输出 + 
 rem    push-logs\history.log         历次推送一行摘要（追加式）
 rem
 rem  说明：
-rem    - gitcode 走 SSH；gitee / github 走 HTTPS（首次推送弹凭据窗口，输一次就记住）
+rem    - gitcode / github 走 SSH（两平台 HTTPS 各有问题：gitcode 禁密码认证、
+rem      github.com:443 常被墙），gitee 走 HTTPS（首次推送弹凭据窗口，输一次就记住）
+rem    - 前提：本机 SSH 公钥已添加到 gitcode 与 github 账号
 rem    - 脚本幂等：重复运行没副作用，远程地址与脚本不一致时自动纠正
 rem    - 执行结束后会停住，提示「按任意键关闭窗口」，不会一闪而过
 rem ============================================================
@@ -21,9 +23,10 @@ cd /d "%~dp0"
 
 rem    - gitcode 走 SSH（该平台已禁用密码认证，HTTPS 必须用私人令牌）
 set "GITCODE_URL=git@gitcode.com:SimianLee/pan-organizer.git"
-rem    - gitee / github 走 HTTPS：首次推送会弹凭据窗口，输一次就会记住
+rem    - gitee 走 HTTPS：首次推送会弹凭据窗口，输一次就会记住
 set "GITEE_URL=https://gitee.com/SimianLee/pan-organizer.git"
-set "GITHUB_URL=https://github.com/SimianLee/pan-organizer.git"
+rem    - github 走 SSH（github.com:443 常被墙，22 端口通常可用）
+set "GITHUB_URL=git@github.com:SimianLee/pan-organizer.git"
 
 rem ---------- 0) 准备日志目录与时间戳 ----------
 if not exist "push-logs" mkdir "push-logs"
@@ -124,8 +127,9 @@ rem ---------- 5) 结束：停住等按键，避免窗口一闪而过 ----------
 echo.
 if defined FAIL (
     if not "%FAIL%"=="0" (
-        echo  提示: gitcode 失败请确认 SSH key 已添加到 gitcode 账号；
-        echo        github 失败请先打开代理再重试（脚本可重复运行，成功的库会跳过）。
+        echo  提示: gitcode / github 走 SSH，失败请确认对应平台的 SSH 公钥已添加；
+        echo        gitee 走 HTTPS，失败请在凭据窗口里重新输入账号密码。
+        echo        脚本可重复运行，成功的库会跳过。
         echo.
     )
 )
