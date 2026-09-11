@@ -178,6 +178,12 @@ class TaskManager:
                 "status": "running",
             }
             save_state(snapshot)
+            # 子进程 stdout 是文件描述符直写，编码由子进程自己决定：
+            # Windows 下 Python 默认按系统区域编码（cp936）写中文日志，
+            # 而本服务按 UTF-8 读 → 整段乱码。强制子进程用 UTF-8 输出。
+            env = dict(os.environ)
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONUTF8"] = "1"
             log_f = open(self.log_path, "w", encoding="utf-8", buffering=1)
             try:
                 self.proc = subprocess.Popen(
@@ -187,6 +193,7 @@ class TaskManager:
                     stderr=subprocess.STDOUT,
                     bufsize=1,
                     text=True,
+                    env=env,
                 )
             except Exception as e:
                 log_f.close()
@@ -252,24 +259,27 @@ class TaskManager:
                 if path.exists():
                     cur_size = path.stat().st_size
                     if cur_size > self.last_size:
-                        with open(path, "r", encoding="utf-8",
-                                  errors="replace") as f:
+                        # 用二进制读：文本模式的 seek 是按字符而非字节，
+                        # 日志含中文时偏移会错位。last_size 始终是字节数。
+                        with open(path, "rb") as f:
                             f.seek(self.last_size)
-                            chunk = f.read()
-                            self.last_size = cur_size
-                            if chunk:
-                                self._broadcast(chunk)
+                            raw = f.read()
+                        self.last_size = cur_size
+                        chunk = decode_log(raw) if raw else ""
+                        if chunk:
+                            self._broadcast(chunk)
             except Exception:
                 pass
             if proc.poll() is not None:
                 # 进程退出，再读一次尾部
                 try:
-                    with open(path, "r", encoding="utf-8",
-                              errors="replace") as f:
+                    with open(path, "rb") as f:
                         f.seek(self.last_size)
-                        tail = f.read()
-                        if tail:
-                            self._broadcast(tail)
+                        raw = f.read()
+                    self.last_size += len(raw)
+                    tail = decode_log(raw) if raw else ""
+                    if tail:
+                        self._broadcast(tail)
                 except Exception:
                     pass
                 with self.lock:
@@ -318,8 +328,7 @@ class TaskManager:
         # 给新订阅者一份当前日志尾部作为起点
         if self.log_path and self.log_path.exists():
             try:
-                txt = self.log_path.read_text(encoding="utf-8",
-                                              errors="replace")
+                txt = read_log(self.log_path)
                 # 仅给前 200 行，避免首次连接就推巨大 backlog
                 lines = txt.splitlines()
                 tail = "\n".join(lines[-200:])
@@ -631,24 +640,51 @@ def api_stop():
 
 
 # ---- 日志 → 任务状态还原（进程重启后内存状态丢失的唯一真相来源） ----
+def decode_log(raw):
+    """把日志字节解码成文本：优先 UTF-8，明显不是则回退 GBK。
+
+    背景：容器（Linux）里子进程默认 UTF-8 输出；但 Windows 上直接跑
+    web.py 时，老版本子进程按系统区域编码（cp936）写日志。两种编码都要
+    能正确读出，否则页面日志区整段中文变乱码（显示为 U+FFFD）。
+    尾部截断可能切在多字节字符中间，用 errors="replace" 容错；只有当
+    替换字符占比异常（>0.5%）才判定为 GBK 文件，避免误伤 UTF-8 日志。
+    """
+    if raw.startswith(b"\xef\xbb\xbf"):          # 带 BOM 的 UTF-8
+        return raw.decode("utf-8-sig", errors="replace")
+    txt = raw.decode("utf-8", errors="replace")
+    bad = txt.count("\ufffd")
+    if bad and bad * 200 > len(txt):
+        try:
+            return raw.decode("gbk")
+        except UnicodeDecodeError:
+            pass
+    return txt
+
+
+def read_log(path):
+    """整读日志文件为文本（兼容 UTF-8 / GBK）。读不到返回空串。"""
+    try:
+        return decode_log(Path(path).read_bytes())
+    except OSError:
+        return ""
+
+
 def _read_tail(path, max_bytes=512 * 1024):
     """读文件尾部。大日志（几十 MB）避免整读撑爆内存，只取末尾 max_bytes。"""
     try:
         size = path.stat().st_size
     except OSError:
         return ""
-    if size <= max_bytes:
-        try:
-            return path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
     try:
-        with open(path, "rb") as f:
-            f.seek(size - max_bytes)
-            data = f.read()
+        if size <= max_bytes:
+            raw = Path(path).read_bytes()
+        else:
+            with open(path, "rb") as f:
+                f.seek(size - max_bytes)
+                raw = f.read()
     except OSError:
         return ""
-    return data.decode("utf-8", errors="replace").lstrip("\n")
+    return decode_log(raw).lstrip("\n")
 
 
 def parse_run_log(path):
@@ -783,7 +819,9 @@ def api_logs_stream():
         "X-Accel-Buffering": "no",   # 关 nginx 缓冲
         "Connection": "keep-alive",
     }
-    return Response(stream_with_context(gen()), mimetype="text/event-stream",
+    # 显式声明 charset=utf-8：日志含中文，避免中间代理按其它编码猜
+    return Response(stream_with_context(gen()),
+                    mimetype="text/event-stream; charset=utf-8",
                     headers=headers)
 
 
@@ -821,7 +859,7 @@ def api_logs_read(name):
             lines = _read_tail(p, 2 * 1024 * 1024).splitlines()
             txt = "\n".join(lines[-n:])
         else:
-            txt = p.read_text(encoding="utf-8", errors="replace")
+            txt = read_log(p)
     except OSError as e:
         return jsonify({"error": f"读取日志失败: {e}"}), 500
     return Response(txt, mimetype="text/plain; charset=utf-8")

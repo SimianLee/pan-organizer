@@ -9,6 +9,7 @@ rem
 rem  日志：
 rem    push-logs\push-<时间戳>.log   本次完整日志（git 原始输出 + 成败结论）
 rem    push-logs\history.log         历次推送一行摘要（追加式）
+rem    两个日志都是 UTF-8 带 BOM，记事本 / Excel / PowerShell 打开中文均不乱码
 rem
 rem  说明：
 rem    - gitcode / github 走 SSH（两平台 HTTPS 各有问题：gitcode 禁密码认证、
@@ -30,11 +31,20 @@ set "GITHUB_URL=git@github.com:SimianLee/pan-organizer.git"
 
 rem ---------- 0) 准备日志目录与时间戳 ----------
 if not exist "push-logs" mkdir "push-logs"
+rem 只调一次 powershell 取时间，且格式不含空格和冒号 ——
+rem 避开 for /f 默认按空格分词、以及 \" 转义在 cmd 下不生效这两个坑
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss"') do set "STAMP=%%i"
-for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format \"yyyy-MM-dd HH:mm:ss\""') do set "NOW=%%i"
 set "PLOG=push-logs\push-%STAMP%.log"
 set "HIST=push-logs\history.log"
 set "TMPR=push-logs\.tmp-last.log"
+rem 由 STAMP 拆出可读时间：20260911-121133 -> 2026-09-11 12:11:33
+set "NOW=%STAMP:~0,4%-%STAMP:~4,2%-%STAMP:~6,2% %STAMP:~9,2%:%STAMP:~11,2%:%STAMP:~13,2%"
+
+rem 日志文件统一用「UTF-8 带 BOM」创建：
+rem 记事本 / Excel / PowerShell 都靠 BOM 识别 UTF-8，没有 BOM 时它们按
+rem 系统 GBK 解码，中文会整段乱码（这就是「日志乱码」的主要来源）
+if not exist "%PLOG%" powershell -NoProfile -Command "[IO.File]::WriteAllText('%PLOG%','',(New-Object System.Text.UTF8Encoding $true))" >nul 2>&1
+if not exist "%HIST%" powershell -NoProfile -Command "[IO.File]::WriteAllText('%HIST%','',(New-Object System.Text.UTF8Encoding $true))" >nul 2>&1
 
 rem ---------- 1) 幂等配置三个远程 ----------
 rem origin 如果指向 gitee，统一改名为 gitee，让三个远程名固定为 gitcode/gitee/github
@@ -79,12 +89,15 @@ if /i "%~1"=="setup" (
 
 rem ---------- 3) 依次推送到三个远程 ----------
 for %%r in (gitcode gitee github) do (
-    for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format \"yyyy-MM-dd HH:mm:ss\""') do set "T0=%%i"
+    rem 循环块内必须用延迟扩展 !T0!；用 %T0% 会在块解析时展开成空值。
+    rem 取 cmd 内置 %TIME% 前 8 位（HH:mm:ss），再把个位数小时的前导空格补成 0
+    set "T0=!TIME:~0,8!"
+    set "T0=!T0: =0!"
     echo ============================================
     echo  开始推送 %%r（分支 %BRANCH%）
     echo ============================================
     >>"%PLOG%" echo.
-    >>"%PLOG%" echo ---- [%%r] 开始 %T0% ----
+    >>"%PLOG%" echo ---- [%%r] 开始 !T0! ----
     git push -u %%r %BRANCH% > "!TMPR!" 2>&1
     set "RC=!errorlevel!"
     type "!TMPR!"
@@ -119,7 +132,9 @@ if %FAIL% equ 0 (
 )
 echo  完整日志: %PLOG%
 echo  历史记录:
-powershell -NoProfile -Command "Get-Content '%HIST%' -Tail 5"
+rem 显式 -Encoding UTF8 不能省：PowerShell 5.1 的 Get-Content 对无 BOM 的
+rem 文件默认按系统 GBK 解码，UTF-8 的中文会整行乱码
+powershell -NoProfile -Command "Get-Content '%HIST%' -Tail 5 -Encoding UTF8"
 echo ============================================
 
 rem ---------- 5) 结束：停住等按键，避免窗口一闪而过 ----------
