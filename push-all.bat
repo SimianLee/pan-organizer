@@ -24,8 +24,9 @@ cd /d "%~dp0"
 
 rem    - gitcode 走 SSH（该平台已禁用密码认证，HTTPS 必须用私人令牌）
 set "GITCODE_URL=git@gitcode.com:SimianLee/pan-organizer.git"
-rem    - gitee 走 HTTPS：首次推送会弹凭据窗口，输一次就会记住
-set "GITEE_URL=https://gitee.com/SimianLee/pan-organizer.git"
+rem    - gitee 走 SSH（2026-09-14 起 HTTPS 推送实测会长时间无响应挂死；
+rem      SSH 认证已验证可用，密钥与本机 id_rsa 相同）
+set "GITEE_URL=git@gitee.com:SimianLee/pan-organizer.git"
 rem    - github 走 SSH（github.com:443 常被墙，22 端口通常可用）
 set "GITHUB_URL=git@github.com:SimianLee/pan-organizer.git"
 
