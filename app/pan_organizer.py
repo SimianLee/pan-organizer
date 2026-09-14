@@ -347,17 +347,21 @@ class WebDAVClient:
                 return None
 
     # -- 移动 ---------------------------------------------------------------
-    def move(self, src, dst, overwrite=False):
+    def move(self, src, dst, overwrite=False, retries=3):
         """
         WebDAV MOVE。overwrite=False 时若目标已存在返回 (412, ...)。
-        返回 (http_code, 响应文本)
+        返回 (http_code, 响应文本)。
+
+        retries：底层 5xx 重试次数。默认 3（对付偶发故障）；对"目标同名"
+        这类确定性错误应传 1 跳过重试——重试只会白等 3 秒后原样失败，
+        且海量撞名时这些无谓重试会成倍拖慢整体进度、刷屏失败假象。
         """
         dest_url = self._url(dst)
         headers = {
             "Destination": dest_url,
             "Overwrite": "T" if overwrite else "F",
         }
-        code, data = self._request("MOVE", src, headers=headers)
+        code, data = self._request("MOVE", src, headers=headers, retries=retries)
         return code, data.decode("utf-8", "replace")
 
     # -- 创建目录 -----------------------------------------------------------
@@ -736,7 +740,9 @@ def _overwrite_with_backup(client, src, dst):
 
     返回 (status, detail, renamed)，语义与 _move_one 一致。
     """
-    bak = f"{dst}{BAK_MARK}{int(time.time())}_{os.getpid() % 1000}"
+    # 纳秒级时间戳：同一秒内对同名目标连续覆盖时，秒级时间戳会让备份名撞车
+    # （前一个备份还没删，下一个让位就 412），纳秒级实际不可能重复
+    bak = f"{dst}{BAK_MARK}{time.time_ns()}_{os.getpid() % 1000}"
     # 1) 目标让位（改名，不是删除——保证可回滚）
     c1, m1 = client.move(dst, bak, overwrite=False)
     if c1 not in (201, 204):
@@ -801,10 +807,15 @@ def _move_one(client, src, dst, on_conflict):
     # overwrite：先让服务端直接用源覆盖目标（本地盘 / 部分网盘支持）。
     # 但 alist + 百度网盘等后端**不支持覆盖式 MOVE**——目标同名时服务端返回
     # errno=12（文件已存在），alist 包装成 HTTP 500，`Overwrite: T` 头形同虚设。
-    # 这类情况落到下面的兜底：先 exists 探测确认目标确实存在，再改用
-    # _overwrite_with_backup()（备份 → 移动 → 删备份 / 失败回滚），把"覆盖"
-    # 拆成服务端支持的原子步骤，既不报错也不丢文件。
-    code, msg = client.move(src, dst, overwrite=True)
+    # 注意这是"确定性错误"而非瞬时故障：原版先按 5xx 重试 3 次（白等 1s+2s），
+    # 撞名时 3 次必然原样失败，还让日志刷屏"[重试] HTTP 500"的失败假象。
+    # 现改为第一次就按不重试拿到结果，立刻用 exists 探测分辨真假：
+    #   目标确有同名 → 改用 _overwrite_with_backup()（备份 → 移动 → 删备份 /
+    #                  失败回滚），把"覆盖"拆成服务端支持的原子步骤；
+    #   目标无同名   → 说明是服务端瞬时故障，再按默认重试补一轮 MOVE；
+    #   探测本身失败 → 无法分辨，同样补一轮 MOVE 后再探测一次，仍撞名则
+    #                  走备份式覆盖，否则如实报失败。
+    code, msg = client.move(src, dst, overwrite=True, retries=1)
     if code in (201, 204):
         return "ok", dst, False
     if code in (409, 412, 500, 502, 503):
@@ -812,11 +823,18 @@ def _move_one(client, src, dst, on_conflict):
         if probe is True:
             # 目标确实存在，而后端拒绝覆盖（不支持 Overwrite）→ 客户端拆步覆盖
             return _overwrite_with_backup(client, src, dst)
-        if 500 <= code < 600:
-            hint = ("已确认目标无同名，判为服务端瞬时故障" if probe is False
-                    else "目标状态无法确认（探测请求也失败），暂按服务端故障处理")
-            return "fail", (f"HTTP {code} {msg.strip()[:200]}"
-                            f"（{hint}，稍后重跑即可）"), False
+        # probe 为 False（确认无同名）/ None（探测也失败）：按瞬时故障补一轮
+        code2, msg2 = client.move(src, dst, overwrite=True)
+        if code2 in (201, 204):
+            return "ok", dst, False
+        probe2 = _dst_exists(client, dst)
+        if probe2 is True:
+            # 补一轮仍失败但目标确实存在 → 还是撞名，走备份式覆盖
+            return _overwrite_with_backup(client, src, dst)
+        hint = ("已确认目标无同名，判为服务端瞬时故障" if probe2 is False
+                else "目标状态无法确认（探测请求也失败），暂按服务端故障处理")
+        return "fail", (f"HTTP {code2} {msg2.strip()[:200]}"
+                        f"（{hint}，稍后重跑即可）"), False
     return "fail", f"HTTP {code} {msg.strip()[:200]}", False
 
 
