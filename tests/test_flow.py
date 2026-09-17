@@ -635,6 +635,70 @@ def main():
     check("无 __bak_ 残留", not [p for p in tree.nodes if ".__bak_" in p],
           str(list(tree.nodes.keys())))
 
+    # ============ v1.5 规则：booksort 图书/漫画按书名类型归类 ============
+    print("\n== 23) booksort：图书按类型归类，非图书文件不动 ==")
+    tree.add_dir("/我的网盘/书库")
+    tree.add_file("/我的网盘/书库/海贼王第01卷.cbz", 50_000_000)          # 漫画后缀直判
+    tree.add_file("/我的网盘/书库/火影忍者漫画全集.pdf", 200_000_000)      # 书名点明漫画
+    tree.add_file("/我的网盘/书库/活着.pdf", 2_000_000)                   # 无类型线索 → 其它图书
+    tree.add_file("/我的网盘/书库/Python编程从入门到实践.epub", 8_000_000) # 计算机IT
+    tree.add_file("/我的网盘/书库/黄帝内经养生智慧.mobi", 3_000_000)       # 医学养生
+    tree.add_file("/我的网盘/书库/中国历史百科全书10.pdf", 30_000_000)     # 历史传记
+    tree.add_file("/我的网盘/书库/封面设计.jpg", 500_000)                 # 非图书 → 原地不动
+    tree.add_file("/我的网盘/书库/主题曲.mp3", 4_000_000)                 # 非图书 → 原地不动
+    code, out = run_cli(["extsort", "--config", config_path,
+                         "--path", "/我的网盘/书库", "--dest", "/我的网盘/书档",
+                         "--rules", "booksort,skip_incomplete", "--apply"], ROOT)
+    check("booksort 执行退出码 0", code == 0, out)
+    check("成功移动 6 个（图书6个 + 非图书2个不动）", "成功移动 6 个" in out, out)
+    check("汇总提示非图书跳过 2 个", "非图书/漫画文件" in out and "2 个" in out, out)
+    check("cbz → 漫画/", "/我的网盘/书档/漫画/海贼王第01卷.cbz" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("书名点明漫画的 pdf → 漫画/", "/我的网盘/书档/漫画/火影忍者漫画全集.pdf" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("无类型线索 → 其它图书/", "/我的网盘/书档/其它图书/活着.pdf" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("Python → 计算机IT/", "/我的网盘/书档/计算机IT/Python编程从入门到实践.epub" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("养生 → 医学养生/", "/我的网盘/书档/医学养生/黄帝内经养生智慧.mobi" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("历史 → 历史传记/", "/我的网盘/书档/历史传记/中国历史百科全书10.pdf" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("非图书 jpg/mp3 原地保留", "/我的网盘/书库/封面设计.jpg" in tree.nodes
+          and "/我的网盘/书库/主题曲.mp3" in tree.nodes, str(tree.nodes.keys()))
+
+    print("\n== 24) booksort 幂等 + 撞名改名：重跑只处理新增 ==")
+    tree.add_file("/我的网盘/书库/活着.pdf", 1_500_000)   # 与已归档同名 → rename 编号
+    code, out = run_cli(["extsort", "--config", config_path,
+                         "--path", "/我的网盘/书库", "--dest", "/我的网盘/书档",
+                         "--rules", "booksort,skip_incomplete", "--apply"], ROOT)
+    check("重跑退出码 0", code == 0, out)
+    check("只移动新来的同名 1 个", "成功移动 1 个" in out, out)
+    check("同名书自动编号 (1)", "/我的网盘/书档/其它图书/活着 (1).pdf" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("原归档文件未被覆盖",
+          tree.nodes["/我的网盘/书档/其它图书/活着.pdf"]["size"] == 2_000_000)
+    code, out = run_cli(["extsort", "--config", config_path,
+                         "--path", "/我的网盘/书库", "--dest", "/我的网盘/书档",
+                         "--rules", "booksort,skip_incomplete", "--apply"], ROOT)
+    check("再跑无操作（非图书不算待办）", "没有需要执行的操作" in out, out)
+
+    print("\n== 25) booksort + by_date 嵌套：类型目录下再按月份分 ==")
+    tree.add_dir("/我的网盘/书库2")
+    tree.add_file("/我的网盘/书库2/投资理财入门.pdf", 1_000_000, mt(2026, 3, 8))
+    tree.add_file("/我的网盘/书库2/英语语法入门.pdf", 2_000_000, mt(2026, 5, 20))
+    code, out = run_cli(["extsort", "--config", config_path,
+                         "--path", "/我的网盘/书库2", "--dest", "/我的网盘/书档2",
+                         "--rules", "booksort,by_date", "--apply"], ROOT)
+    check("嵌套执行退出码 0", code == 0, out)
+    check("成功移动 2 个", "成功移动 2 个" in out, out)
+    check("经济管理/2026-03/ 嵌套落位",
+          "/我的网盘/书档2/经济管理/2026-03/投资理财入门.pdf" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("外语学习/2026-05/ 嵌套落位",
+          "/我的网盘/书档2/外语学习/2026-05/英语语法入门.pdf" in tree.nodes,
+          str(tree.nodes.keys()))
+
     server.shutdown()
     print(f"\n========== 测试结果：通过 {PASS}，失败 {FAIL} ==========")
     sys.exit(1 if FAIL else 0)

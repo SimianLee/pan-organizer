@@ -947,6 +947,14 @@ def api_rules():
                 "category": "core",
             },
             {
+                "id": "booksort",
+                "name": "图书归类（按书名识别类型）",
+                "description": "图书/漫画文件按书名关键词归入 漫画/教材教辅/计算机IT/医学养生/…/其它图书 目录；"
+                              "非图书文件原地不动",
+                "default": False,
+                "category": "core",
+            },
+            {
                 "id": "by_date",
                 "name": "按修改日期归档",
                 "description": "按文件修改时间建 YYYY-MM 月份目录",

@@ -84,7 +84,7 @@ except Exception:
 
 DAV = "{DAV:}"
 # 版本号唯一来源：README 徽标 / Dockerfile label / Web /api/health / 页面页脚都引用它
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 APP_NAME = f"pan-organizer/{APP_VERSION}"
 
 
@@ -1030,6 +1030,92 @@ def category_of(ext):
     return CATEGORY_MAP.get(ext.lower(), "其他")
 
 
+# ---------------------------------------------------------------------------
+# booksort：图书/漫画按书名类型归类（v1.5）
+# ---------------------------------------------------------------------------
+# 思路：正则分不出简繁、书名和类型也没有字面必然联系，所以采用
+# "漫画后缀直判 + 书名关键词顺位匹配 + 兜底目录" 三层策略：
+#   1) cbz/cbr 等漫画后缀 → 漫画/（最可靠，直接判型）
+#   2) 书名命中哪条关键词规则 → 对应类型目录（规则按优先级排序，先具体后宽泛）
+#   3) 全不命中 → 其它图书/（如《活着》这类书名无类型线索的经典）
+# 关键词覆盖不了的（预计 2~3 成）留给人工或后续接 LLM 二次分类。
+# 注意 BOOK_RULES 顺序即优先级：越靠前越先匹配，调整顺序即可调分类效果。
+
+# 图书常见格式（纯文本/排版书/扫描书）
+BOOK_EXTS = {
+    "txt", "pdf", "epub", "mobi", "azw", "azw3", "prc", "doc", "docx",
+    "rtf", "html", "htm", "chm", "djvu", "pdb", "lrf", "fb2", "lit",
+}
+# 漫画专属格式（后缀即铁证，直接判漫画）
+COMIC_EXTS = {"cbz", "cbr", "cbt", "cb7", "cba"}
+# 漫画目录名 / 图书兜底目录名
+COMIC_DIR = "漫画"
+BOOK_UNCLASSIFIED = "其它图书"
+
+# 书名关键词规则（顺序 = 优先级，先具体后宽泛）。
+# 单字关键词（医/药/史）误伤率高，统一用词组；用 re.IGNORECASE 兼容英文书名。
+BOOK_RULES = [
+    ("教材教辅", "教材|教辅|教程|考点|真题|试卷|习题|辅导|考试|高考|中考|考研|"
+                "四六级|六级|四级|雅思|托福|公务员|建造师|注册会计师|指南|手册|题库|"
+                "词典|字典|辞海|工具书"),
+    ("计算机IT", "编程|程序|代码|算法|数据结构|人工智能|机器学习|深度学习|神经网络|"
+                "Linux|Windows|Python|Java|Javas?Script|C\\+\\+|C#|SQL|数据库|前端|后端|"
+                "程序员|软件工程|计算机网络|操作系统|正则表达式|Excel|Photoshop|CAD"),
+    ("医学养生", "医学|医药|中医|西医|临床|护理|护士|解剖|针灸|推拿|按摩|艾灸|经络|"
+                "养生|保健|健康|药膳|营养|黄帝内经|本草|伤寒论|丹溪|中医入门|康复"),
+    ("心理学",   "心理学|心理|情绪|焦虑|抑郁|自卑|自控|意志|微表情|催眠|梦的解析|"
+                "人格|性格|认知|幸福感|亲密关系"),
+    ("历史传记", "历史|通史|史记|朝代|春秋|战国|秦汉|唐宋|明清|民国|考古|文物|文明史|"
+                "帝国|王朝|皇帝|传记|自传|回忆录|人物传|大传|评传|年谱"),
+    ("经济管理", "经济|金融|投资|理财|股票|基金|证券|期货|管理|营销|创业|会计|财务|"
+                "经济学|资本论|国富论|货币|商业|贸易|公司|领导力|复盘"),
+    ("法律",     "法律|法学|法规|刑法|民法|合同法|宪法|诉讼|律师|司法|办案|法条"),
+    ("哲学宗教", "哲学|佛教|道教|禅修|禅|佛学|圣经|古兰经|塔木德|论语|道德经|老子|"
+                "庄子|孟子|易经|周易|王阳明|心学|苏格拉底|柏拉图|亚里士多德|康德|黑格尔|"
+                "尼采|叔本华|罗素|存在主义|形而上学"),
+    ("外语学习", "英语|日语|韩语|法语|德语|俄语|西班牙语|新概念|语法|单词|词汇|口语|"
+                "听力|阅读理解|English|Japanese"),
+    ("少儿绘本", "儿童|幼儿|亲子|育儿|童话|绘本|睡前故事|儿童文学|漫画书|少儿|小朋友|"
+                "识字|拼音|启蒙"),
+    ("文学小说", "小说|文学|散文|随笔|杂文|诗集|诗歌|词选|名著|文集|全集|选集|长篇|"
+                "短篇|科幻|推理|悬疑|武侠|言情|余华|莫言|路遥|贾平凹|金庸|古龙|"
+                "村上春树|东野圭吾|马尔克斯|海明威|卡夫卡"),
+    ("生活百科", "食谱|菜谱|家常菜|烹饪|烘焙|茶道|咖啡|旅游|旅行|攻略|手工|编织|"
+                "家居|装修|收纳|育儿百科|百科全书|生活|健身|瑜伽|跑步|钓鱼|花艺|园艺"),
+]
+# 预编译（模块加载时一次，扫描海量文件时零重复开销）
+BOOK_RULES_COMPILED = [(label, re.compile(pat, re.IGNORECASE))
+                        for label, pat in BOOK_RULES]
+# 漫画关键词（PDF 等通用格式但书名点明是漫画时用）
+COMIC_NAME_RE = re.compile(
+    r"漫画|连环画|画集|画册|漫画版|全彩漫画|番外|单行本", re.IGNORECASE)
+
+
+def booksort_classify(name, ext):
+    """
+    文件名 + 后缀 → 图书类型目录名。
+    返回 None 表示"不是图书/漫画文件"（booksort 规则不碰它）；
+    返回 "其它图书" 表示是图书但书名没有类型线索。
+    """
+    ext = (ext or "").lower()
+    # 漫画专属后缀 → 铁证直判
+    if ext in COMIC_EXTS:
+        return COMIC_DIR
+    # 非图书后缀 → 不归 booksort 管
+    if ext not in BOOK_EXTS:
+        return None
+    # 图书格式但书名点明是漫画（大量漫画用 pdf 发布）
+    if COMIC_NAME_RE.search(name):
+        return COMIC_DIR
+    # 关键词顺位匹配（先具体后宽泛，首个命中即归类）
+    for label, pattern in BOOK_RULES_COMPILED:
+        if pattern.search(name):
+            return label
+    # 书名无类型线索（如《活着》）→ 兜底目录，留人工/LLM 二次分类
+    return BOOK_UNCLASSIFIED
+
+
+
 # ---- v2 规则：按文件大小归档（四档）----
 SIZE_BUCKETS = [
     (10 * 1024 * 1024, "小于10MB"),
@@ -1106,6 +1192,7 @@ def extsort_plan(client, cfg, root, dest, depth,
     stats = {
         "files": len(files), "hit": 0, "skip_same": 0, "renamed": 0,
         "skip_filter": 0, "excluded": skipped_excluded, "skip_size": 0,
+        "skip_nonbook": 0,
     }
 
     for ent in files:
@@ -1136,10 +1223,18 @@ def extsort_plan(client, cfg, root, dest, depth,
             continue
 
         # ---- 目标目录：按勾选规则嵌套拼接 ----
-        # 首段：按大类（category）优先，其次按后缀（extsort）；两者可二选一。
-        # 之后按日期（YYYY-MM）、按大小（四档）逐级追加子目录。
+        # 首段：booksort（图书按类型归类）优先级最高；其次大类（category）、
+        # 再次按后缀（extsort）；三者互斥取一。之后按日期（YYYY-MM）、
+        # 按大小（四档）逐级追加子目录。
         segs = []
-        if "category" in enabled_rules:
+        if "booksort" in enabled_rules:
+            bcat = booksort_classify(ent.name, ext)
+            if bcat is None:
+                # 非图书/漫画文件：booksort 规则不碰，原地保留
+                stats["skip_nonbook"] += 1
+                continue
+            segs.append(bcat)
+        elif "category" in enabled_rules:
             segs.append(category_of(ext))
         elif "extsort" in enabled_rules:
             segs.append(ext if ext else NOEXT_DIR)
@@ -1149,7 +1244,10 @@ def extsort_plan(client, cfg, root, dest, depth,
                 segs.append(df)
         if "by_size" in enabled_rules:
             segs.append(size_bucket(ent.size or 0))
-        folder = "/".join(segs) if segs else (ext if ext else NOEXT_DIR)
+        if "booksort" in enabled_rules:
+            folder = "/".join(segs) if segs else bcat
+        else:
+            folder = "/".join(segs) if segs else (ext if ext else NOEXT_DIR)
 
         dst = norm_path(f"{dest}/{folder}/{ent.name}")
         bucket = ext_stats.setdefault(
@@ -1163,8 +1261,13 @@ def extsort_plan(client, cfg, root, dest, depth,
             stats["skip_same"] += 1
             continue
 
+        # 计划预览行的规则标签：booksort 显示图书类型，其余沿用后缀
+        if "booksort" in enabled_rules:
+            rule_label = f"[{bcat}]"
+        else:
+            rule_label = f".{ext}" if ext else f"({NOEXT_DIR})"
         ops.append({
-            "rule": f".{ext}" if ext else f"({NOEXT_DIR})",
+            "rule": rule_label,
             "entry": ent, "dst": dst, "action": "move", "conflict": False,
         })
         stats["hit"] += 1
@@ -1473,12 +1576,14 @@ def cmd_extsort(args):
             print(f"  {label:<{w}}  {count:>6} 个  {fmt_size(size):>9}  →  {dst_dir}  {note}")
     if stats["skip_same"]:
         print(f"其中 {stats['skip_same']} 个已在对应后缀目录中（幂等跳过）")
-    if stats["skip_filter"] or stats["skip_size"]:
+    if stats["skip_filter"] or stats["skip_size"] or stats.get("skip_nonbook"):
         skip_reason = []
         if stats["skip_filter"]:
             skip_reason.append(f"跳过未完成/指定外后缀 {stats['skip_filter']} 个")
         if stats["skip_size"]:
             skip_reason.append(f"大小不在范围内 {stats['skip_size']} 个")
+        if stats.get("skip_nonbook"):
+            skip_reason.append(f"非图书/漫画文件（booksort 规则不搬动）{stats['skip_nonbook']} 个")
         print(f"未列入计划：{'，'.join(skip_reason)}")
 
     # ---- 目标目录原本条目检测（防覆盖可见性）----
@@ -1767,6 +1872,7 @@ def main():
     p_ext.add_argument("--rules", default="extsort,skip_incomplete",
                        help="启用的规则 id（逗号分隔，可组合嵌套目录）："
                             "extsort按后缀 / skip_incomplete跳过未完成文件 / category按大类 / "
+                            "booksort图书漫画按书名类型归类（漫画/小说/历史/医学…，非图书不动）/ "
                             "by_date按日期 / by_size按大小 / regex_match正则筛选 / "
                             "cleanup_empty清理空目录。默认 extsort,skip_incomplete")
     p_ext.add_argument("--regex-pattern", default=None,

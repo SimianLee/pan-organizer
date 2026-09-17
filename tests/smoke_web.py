@@ -17,6 +17,9 @@ sys.path.insert(0, os.path.join(ROOT, "tests"))
 import web            # noqa: E402
 import test_flow      # noqa: E402
 
+# 版本号不硬编码：从主程序动态取，升级版本不再需要改测试（v1.5 起）
+APP_VER = web.APP_VERSION
+
 PASS = 0
 FAIL = 0
 
@@ -90,7 +93,7 @@ def main():
     code, j = jget("/api/health")
     check("/api/health ok", code == 200 and j and j.get("ok"), f"{code} {j}")
     check("/api/health 版本与页面一致",
-          (j or {}).get("version") == "1.4", str(j))
+          (j or {}).get("version") == APP_VER, str(j))
 
     r = c.get("/static/vendor/tailwind.js")
     check("内置 Tailwind 可访问（离线可用）",
@@ -98,7 +101,7 @@ def main():
     check("首页引用本地 Tailwind",
           "vendor/tailwind.js" in c.get("/").get_data(as_text=True))
     check("首页显示版本号",
-          "v1.4" in c.get("/").get_data(as_text=True))
+          f"v{APP_VER}" in c.get("/").get_data(as_text=True))
 
     code, j = jget("/api/state")
     check("/api/state 200", code == 200, code)
@@ -233,7 +236,7 @@ def main():
     check("日志含收尾统计", "完成：成功移动" in txt, txt[-400:])
     # —— 本轮新增的日志增强 ——
     check("日志含任务头（时间戳+版本+命令行）",
-          "启动 · " in txt and "pan-organizer/1.4" in txt and "命令行" in txt,
+          "启动 · " in txt and f"pan-organizer/{APP_VER}" in txt and "命令行" in txt,
           txt[:600])
     check("日志含撞名策略", "撞名策略" in txt, txt[:600])
     check("日志含失败明细区块或跳过说明",
