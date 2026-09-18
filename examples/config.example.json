@@ -8,5 +8,18 @@
   "options": {
     "on_conflict": "skip",
     "exclude_dirs": []
+  },
+  "online": {
+    "_说明": "图书联网补全（bookonline 规则）用：本地关键词判不出类型的书才联网查。不需要就把 rules 里的 bookonline 去掉即可",
+    "provider": "auto",
+    "timeout": 8,
+    "workers": 3,
+    "limit": 0,
+    "delay": 0.4,
+    "llm": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key": ""
+    }
   }
 }

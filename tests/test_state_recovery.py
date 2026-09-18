@@ -32,8 +32,11 @@ src = src.replace(
 )
 (APP_TMP / "web.py").write_text(src, encoding="utf-8")
 
-# web.py 还要 pan_organizer.py、templates/、static/（供 Flask）
-shutil.copy(APP_SRC / "pan_organizer.py", APP_TMP / "pan_organizer.py")
+# web.py 还要同目录的其它模块（pan_organizer / book_online …）、templates/、static/
+# 注意：这里按 *.py 全量复制，以后 app/ 下再拆新模块不用改本测试
+for py in APP_SRC.glob("*.py"):
+    if py.name != "web.py":                      # web.py 已单独改写后写入
+        shutil.copy(py, APP_TMP / py.name)
 shutil.copytree(APP_SRC / "templates", APP_TMP / "templates")
 shutil.copytree(APP_SRC / "static", APP_TMP / "static")
 

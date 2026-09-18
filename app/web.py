@@ -90,7 +90,12 @@ PAN_ORGANIZER = APP_DIR / "pan_organizer.py"
 sys.path.insert(0, str(APP_DIR))
 from pan_organizer import (  # noqa: E402
     APP_VERSION, WebDAVClient, WebDAVError, norm_path,
+    BOOK_LABELS, booksort_match_text,
 )
+try:
+    import book_online                     # 图书联网二次分类（v1.6）
+except ImportError:                        # 极少数"只拷了部分文件"的部署：
+    book_online = None                     # 联网功能降级，其余功能照常
 
 PYTHON_BIN = sys.executable
 
@@ -111,6 +116,22 @@ def load_config():
 def save_config(cfg):
     CONFIG_PATH.write_text(
         json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def mask_secrets(cfg):
+    """
+    回给前端前把敏感字段遮罩：alist 密码、联网补全的 LLM api_key。
+    只回 "已设置" 标记 + 空值，前端不动该字段即保持原值不变。
+    """
+    view = json.loads(json.dumps(cfg or {}))
+    if (view.get("alist") or {}).get("password"):
+        view["alist"]["password_set"] = True
+        view["alist"]["password"] = ""
+    llm = ((view.get("online") or {}).get("llm") or {})
+    if llm.get("api_key"):
+        llm["api_key_set"] = True
+        llm["api_key"] = ""
+    return view
 
 
 def load_state():
@@ -387,14 +408,8 @@ def api_health():
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
     if request.method == "GET":
-        cfg = load_config()
-        al = cfg.get("alist", {})
-        # 不要把真实密码回给前端，只回显"已设置"标记
-        if al.get("password"):
-            cfg_view = json.loads(json.dumps(cfg))
-            cfg_view["alist"]["password_set"] = True
-            cfg_view["alist"]["password"] = ""
-        return jsonify(cfg_view if al.get("password") else cfg)
+        # 不要把真实密码/API key 回给前端，只回显"已设置"标记
+        return jsonify(mask_secrets(load_config()))
 
     data = request.get_json(force=True, silent=True) or {}
     cfg = load_config()
@@ -407,6 +422,19 @@ def api_config():
             al[k] = v
     if "options" in data:
         cfg.setdefault("options", {}).update(data["options"])
+    if "online" in data:
+        # 联网补全（bookonline）配置：provider/超时/并发/上限 + llm 子对象
+        on = cfg.setdefault("online", {})
+        for k, v in (data["online"] or {}).items():
+            if k == "llm" and isinstance(v, dict):
+                llm = on.setdefault("llm", {})
+                for kk, vv in v.items():
+                    # api_key 留空表示"不修改"（前端回显的是空值，不能拿它覆盖真 key）
+                    if kk == "api_key" and not vv:
+                        continue
+                    llm[kk] = vv
+            elif v not in (None, ""):
+                on[k] = v
     save_config(cfg)
     return jsonify({"ok": True})
 
@@ -421,14 +449,8 @@ def api_state():
        - status  : 当前 web 进程内存里的实时任务状态
        - last_run: 从 state + 最新日志还原的最近一次恢复信息（供 UI 进度条展示）
     """
-    # 配置（密码遮罩）
-    cfg = load_config()
-    al = cfg.get("alist", {})
-    if al.get("password"):
-        cfg_view = json.loads(json.dumps(cfg))
-        cfg_view["alist"]["password_set"] = True
-        cfg_view["alist"]["password"] = ""
-        cfg = cfg_view
+    # 配置（密码 / API key 遮罩）
+    cfg = mask_secrets(load_config())
 
     state = load_state()
     st = TM.get_status()
@@ -955,6 +977,15 @@ def api_rules():
                 "category": "core",
             },
             {
+                "id": "bookonline",
+                "name": "图书联网补全（需与「图书归类」同用）",
+                "description": "本地关键词判不出类型的书（如《活着》）联网查类型："
+                               "默认用当当图书分类（免费、无需 key），也可配 LLM 接口（更准）。"
+                               "只查「其它图书」那部分，结果本地缓存，查不到就保持原样",
+                "default": False,
+                "category": "core",
+            },
+            {
                 "id": "by_date",
                 "name": "按修改日期归档",
                 "description": "按文件修改时间建 YYYY-MM 月份目录",
@@ -1007,6 +1038,63 @@ def api_rules():
             },
         ]
     })
+
+
+# ---- 图书联网补全（bookonline 规则，v1.6）----
+@app.route("/api/online/defaults")
+def api_online_defaults():
+    """联网补全的默认配置 + 可用类型清单（前端表单预填用，不落盘）"""
+    if book_online is None:
+        return jsonify({"ok": False, "error": "联网补全模块（book_online.py）未安装",
+                        "defaults": {}, "providers": [], "labels": BOOK_LABELS})
+    return jsonify({"defaults": book_online.DEFAULT_CONFIG,
+                    "providers": [
+                        {"id": "auto", "name": "自动（先 LLM，再当当）"},
+                        {"id": "dangdang", "name": "当当图书分类（免费，无需 key）"},
+                        {"id": "llm", "name": "LLM 接口（需自配 key，最准）"},
+                    ],
+                    "labels": BOOK_LABELS})
+
+
+@app.route("/api/online/test", methods=["POST"])
+def api_online_test():
+    """
+    试查一个书名，回显命中的类型与数据源，方便正式跑之前验证配置。
+    不写缓存（测试不应污染正式结果）；网络失败也只回错误信息，不影响任务。
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    title = (data.get("title") or "").strip()
+    if not title:
+        return jsonify({"ok": False, "error": "请填写要试查的书名"}), 400
+    if book_online is None:
+        return jsonify({"ok": True, "input": title, "label": None, "source": "",
+                        "raw": "", "error": "联网补全模块（book_online.py）未安装",
+                        "elapsed": 0, "hint": "当前部署缺少 book_online.py"})
+    ocfg = dict(load_config().get("online") or {})
+    if data.get("provider"):
+        ocfg["provider"] = data["provider"]
+    logs = []
+    t0 = time.time()
+    try:
+        clf = book_online.OnlineClassifier(ocfg, booksort_match_text,
+                                           cache_path=None, log=logs.append)
+        clf.labels = BOOK_LABELS
+        res = clf.probe(title)
+    except Exception as e:                        # 网络/配置问题都只回错误
+        return jsonify({"ok": True, "input": title, "label": None, "source": "",
+                        "raw": "", "error": f"{type(e).__name__}: {e}",
+                        "elapsed": round(time.time() - t0, 2),
+                        "hint": "查询失败（检查网络 / 代理 / api_key 配置）"})
+    res.update({
+        "ok": True, "input": title,
+        "elapsed": round(time.time() - t0, 2),
+        "hint": (f"→ 会归入「{res['label']}」目录" if res.get("label")
+                 else "未识别（保持「其它图书」）"),
+    })
+    # 有错误原因就如实说明（否则用户分不清"网络不通"和"站点判不出类型"）
+    if res.get("error"):
+        res["hint"] = f"查询失败：{res['error']}（检查网络 / 代理 / api_key 配置）"
+    return jsonify(res)
 
 
 # ---- 静态文件 ----

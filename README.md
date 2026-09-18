@@ -3,7 +3,15 @@
 通过 **Alist 的 WebDAV 接口**，按规则把网盘（百度网盘等）上的文件**移动到指定目录**。
 移动在网盘服务端直接完成（alist 调用网盘 API 执行），不经过本地中转，不占用本地带宽。
 
-> **当前版本：v1.4（Web 计划管理 + v2 规则引擎落地）**——三按钮（查询预览 / 查询并移动 / 按计划移动）+ 📋 计划管理折叠区（查看/下载/删除/应用），计划下拉**默认不选**避免误触发；规则页新增**按大类 / 按日期 / 按大小 / 正则筛选 / 清理空目录 / skip_incomplete 开关**并支持嵌套目录组合，引擎与 Web 全链路接通。**v1.4 还带来：日志全面增强**（任务头含版本/命令行/撞名策略、[失败明细] 分类清单、[执行汇总] 一行统计、任务尾含耗时与失败指引，全行带时间戳，出问题可凭日志精准定位）；**样式库本地内置**（`static/vendor/tailwind.js`，NAS 断外网页面不再退化成裸 HTML，缺失时自动回落 CDN）；**镜像装 tzdata**（日志时间戳与本地一致）；页面响应式适配窄屏，页脚显示真实端口。
+> **当前版本：v1.6（图书漫画归类 + 联网补全）**——新增 `booksort` 规则：
+> 图书/漫画按**书名**归入类型目录（漫画 / 教材教辅 / 计算机IT / 医学养生 / 心理学 / 历史传记 /
+> 经济管理 / 法律 / 哲学宗教 / 外语学习 / 少儿绘本 / 文学小说 / 生活百科 / 其它图书），
+> 非图书文件原地不动，可与 by_date 等规则嵌套。新增 `bookonline` 规则：本地书名没有类型线索的
+> （《活着》《围城》）**联网查类型**再归类——默认用当当图书分类（免费、无需 key），
+> 也可配 LLM 接口；只查兜底项、结果落本地缓存、网络异常只降级不中断任务。
+> Web 规则页可直接勾选、改数据源/并发/上限，并支持**试查**单个书名。
+>
+> **v1.5 及更早**：v1.5 图书漫画归类雏形；v1.4（Web 计划管理 + v2 规则引擎落地）——三按钮（查询预览 / 查询并移动 / 按计划移动）+ 📋 计划管理折叠区（查看/下载/删除/应用），计划下拉**默认不选**避免误触发；规则页新增**按大类 / 按日期 / 按大小 / 正则筛选 / 清理空目录 / skip_incomplete 开关**并支持嵌套目录组合，引擎与 Web 全链路接通。**v1.4 还带来：日志全面增强**（任务头含版本/命令行/撞名策略、[失败明细] 分类清单、[执行汇总] 一行统计、任务尾含耗时与失败指引，全行带时间戳，出问题可凭日志精准定位）；**样式库本地内置**（`static/vendor/tailwind.js`，NAS 断外网页面不再退化成裸 HTML，缺失时自动回落 CDN）；**镜像装 tzdata**（日志时间戳与本地一致）；页面响应式适配窄屏，页脚显示真实端口。
 
 ```
 ┌─────────────┐   WebDAV (PROPFIND/MOVE/MKCOL)   ┌──────────────┐
@@ -21,17 +29,19 @@
 ```
 netdisk-sorter/
 ├── app/                  ← Docker 镜像构建上下文（纯净运行时）
-│   ├── pan_organizer.py       ← 核心 CLI 引擎
+│   ├── pan_organizer.py  ← 核心 CLI 引擎
+│   ├── book_online.py    ← 图书联网二次分类（bookonline 规则的数据源/缓存）
 │   ├── web.py            ← Flask Web 后端
 │   ├── templates/        ← 页面模板
 │   ├── static/           ← 前端 JS / CSS
 │   ├── requirements.txt  ← Python 依赖
 │   ├── Dockerfile
 │   └── docker-compose.yml
-├── data/                 ← 持久化目录（Docker 唯一挂载点）
-│   ├── config.json       ← alist 连接 + 默认 options
+├── data/                 ← 持久化目录（Docker 唯一挂载点，已 gitignore）
+│   ├── config.json       ← alist 连接 + 默认 options + online（联网补全设置）
 │   ├── state.json        ← 最近任务完整快照（容器重建后页面恢复用）
 │   ├── plans/            ← plan-*.json（"查询"导出的计划，供"按计划移动"）
+│   ├── online_cache.json ← 联网补全的书名→类型缓存（重跑零请求）
 │   └── logs/             ← run-YYYYMMDD-HHMMSS.log 历史日志
 ├── docs/                 ← 详细文档
 │   ├── README-web.md
@@ -143,6 +153,55 @@ python pan_organizer.py extsort --path /下载 --dest /归档 \
 > `skip_incomplete` 是"跳过未完成下载文件"的开关（默认开）；关掉后 `.part/.tmp` 也会被归档。
 > `dedupe`（重复文件 hash 检测）与 `cron`（定时调度）为规划中，尚未实现。
 
+### 图书 / 漫画按类型归类（v1.5+）
+
+`booksort` 规则把图书、漫画按**书名**归入类型目录（非图书文件原地不动）：
+
+```bash
+# 图书按类型归类：活着.pdf → /书库/文学小说/活着.pdf
+python pan_organizer.py extsort --path /网盘/杂书 --dest /网盘/书库 \
+    --rules booksort,skip_incomplete --apply
+
+# 类型目录下再按月份分：xxx.epub → /书库/计算机IT/2026-03/xxx.epub
+python pan_organizer.py extsort --path /网盘/杂书 --dest /网盘/书库 \
+    --rules booksort,by_date,skip_incomplete --apply
+```
+
+三层判定：**漫画后缀直判**（cbz/cbr/cbt/cb7/cba + 书名含"漫画/连环画/画集"）→
+**书名关键词顺位匹配**（教材教辅 / 计算机IT / 医学养生 / 心理学 / 历史传记 / 经济管理 /
+法律 / 哲学宗教 / 外语学习 / 少儿绘本 / 文学小说 / 生活百科）→ 都不中归 `其它图书/`。
+
+图书格式：`txt pdf epub mobi azw azw3 prc doc docx rtf html htm chm djvu pdb lrf fb2 lit`；漫画：`cbz cbr cbt cb7 cba`。
+
+### 图书联网补全（v1.6）：给「其它图书」再判一次
+
+书名不带类型线索的经典（《活着》《围城》《人类简史》）本地规则判不出，会被兜进
+`其它图书/`。加上 `bookonline` 规则后，这部分**联网查类型**再归类：
+
+```bash
+# 本地判不出的书联网查（默认用当当图书分类，免费、无需 key）
+python pan_organizer.py extsort --path /网盘/杂书 --dest /网盘/书库 \
+    --rules booksort,bookonline,skip_incomplete --apply
+
+# 先小批量试跑 200 本，确认效果和站点限流情况
+python pan_organizer.py extsort --path /网盘/杂书 --dest /网盘/书库 \
+    --rules booksort,bookonline --online-limit 200 --apply
+```
+
+行为与边界：
+
+- **只查兜底项**：已能用关键词判出类型的一律不联网；非图书文件完全不参与。
+- **结果落缓存**：`data/online_cache.json`（含命中的书名/类型/来源，可人工核对），
+  同一本书只查一次，重跑 / 续跑零请求；`--online-refresh` 强制重查。
+- **只降级不中断**：网络不通、页面改版、站点限流都只是"这本书没识别"，
+  仍归 `其它图书/`，任务照常完成；遇到验证码/限流会自动熔断，不再继续打站点。
+- **宁缺毋滥**：查到的商品书名与你要查的书名相似度过低（搜到的是别的书）时不采纳。
+- 数据源 `dangdang`（默认，免费）取商品页面包屑「图书 > 小说 > 社会小说」；
+  也可把 `provider` 设为 `llm`，用 OpenAI 兼容接口（DeepSeek / 通义 / 智谱 / Kimi /
+  本地 Ollama）判定，准确率更高，需在 `config.json` 配 `api_key`。
+- Web 端：规则页勾选「图书联网补全」，下方可改数据源 / 并发 / 上限 / LLM 设置，
+  并有**试查**框（输入书名立刻看它会被归到哪一类）。
+
 大数据量建议（后面有详细说明）：
 
 1. **先跑一次不带 `--apply` 的预览**，看统计行——确认能扫到文件、归档目录符合预期。
@@ -199,8 +258,11 @@ python pan_organizer.py run --path /百度网盘/下载 --apply
 | `--skip-ext x,y` | 额外跳过后缀；`.part/.tmp/.crdownload/.downloading/.!qB/.temp` 默认已跳过 |
 | `--skip-noext` | 无后缀文件不归 `noext/` 而是直接跳过 |
 | `--min-mb / --max-mb` | 只整理大小在区间内的文件 |
-| `--rules a,b,c` | 启用的规则 id（默认 `extsort,skip_incomplete`）。可选：`extsort`按后缀 / `category`按大类 / `by_date`按修改月份 / `by_size`按大小档 / `skip_incomplete`跳过未完成文件 / `regex_match`正则筛选 / `cleanup_empty`清理空目录 |
+| `--rules a,b,c` | 启用的规则 id（默认 `extsort,skip_incomplete`）。可选：`extsort`按后缀 / `category`按大类 / `booksort`图书漫画按书名归类 / `bookonline`图书联网补全（需与 `booksort` 同用） / `by_date`按修改月份 / `by_size`按大小档 / `skip_incomplete`跳过未完成文件 / `regex_match`正则筛选 / `cleanup_empty`清理空目录 |
 | `--regex-pattern 正则` | 配合 `regex_match`：只整理文件名匹配正则的文件（如 `2026`、`\.(pdf\|epub)$`） |
+| `--online-provider 源` | 配合 `bookonline`：`auto`（默认，先 LLM 再当当）/ `dangdang` / `llm` |
+| `--online-limit N` | 配合 `bookonline`：单次最多查 N 个书名（默认取配置，0 = 不限），适合先小批量试跑 |
+| `--online-refresh` | 配合 `bookonline`：忽略缓存 `data/online_cache.json`，强制重新联网查询 |
 | `--plan out.json` | 把整理计划导出为 JSON（含 meta + ops；审计 / 后续 `--from-plan` 复用） |
 | `--from-plan out.json` | 跳过扫描，按 `--plan` 导出的计划直接执行：先 dry-run 预览，加 `--apply` 真正移动（Web「按计划移动」同机制） |
 | `--verbose` | 逐条打印每个文件的移动（默认只打汇总 + 进度） |
@@ -257,6 +319,18 @@ python pan_organizer.py run --path /百度网盘/下载 --apply
                                                   //   skip      → 撞名不搬，跳过
                                                   //   overwrite → 用源文件替换目标同名文件（内容以源为准）
     "exclude_dirs": ["/百度网盘/已整理"]            // 黑名单目录（绝对路径），整体跳过
+  },
+  "online": {                                     // 图书联网补全（bookonline 规则）用，不用可整段删掉
+    "provider": "auto",                           // auto（先 LLM 再当当）/ dangdang / llm
+    "timeout": 8,                                 // 单次 HTTP 超时（秒）
+    "workers": 3,                                 // 并发查询数（别调太大，站点会限流）
+    "limit": 0,                                   // 单次最多查多少本，0 = 不限
+    "delay": 0.4,                                 // 每请求间隔（秒）
+    "llm": {                                      // provider=llm 时用（OpenAI 兼容接口）
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key": ""                               // 只存本机，不进 git（data/ 已忽略）
+    }
   }
 }
 ```
@@ -345,14 +419,17 @@ A: Windows 用任务计划程序、Linux/NAS 用 cron 定时跑 `extsort --apply
 自带本地模拟 alist 的测试（无需真实网盘），覆盖规则模式移动、冲突改名、递归、幂等、
 目录排除、extsort 按后缀归档、撞名 500 兜底、覆盖式整理的"备份式覆盖 + 失败回滚"，
 `--plan` 导出 → `--from-plan` 执行全链路，
-以及 v2 规则（大类/日期/大小嵌套目录、正则筛选、清理空目录、skip_incomplete 开关）：
+v2 规则（大类/日期/大小嵌套目录、正则筛选、清理空目录、skip_incomplete 开关），
+v1.5 图书漫画归类，v1.6 图书联网补全（含假"当当"站点，全程不联网）：
 
 ```bash
-python tests/test_flow.py            # 109 项断言（含 mock WebDAV 服务端到端）
-python tests/test_plan_ops.py        # 16 项（计划文件解析 / 旧格式兼容 / 404 跳过）
-python tests/test_state_recovery.py  # 30 项（状态持久化与页面恢复）
-python tests/smoke_web.py            # 65 项（Web 全接口冒烟 + query→plan→move 全链路，
-                                     #      临时数据目录，不碰真实 data/）
+python tests/test_flow.py            # 144 项断言（含 mock WebDAV 服务端到端）
+python tests/test_plan_ops.py        #  16 项（计划文件解析 / 旧格式兼容 / 404 跳过）
+python tests/test_state_recovery.py  #  30 项（状态持久化与页面恢复）
+python tests/smoke_web.py            #  80 项（Web 全接口冒烟 + query→plan→move 全链路，
+                                     #       临时数据目录，不碰真实 data/）
+python tests/test_online.py          #  48 项（书名清洗 / 面包屑解析 / 类型匹配 /
+                                     #       缓存 / 降级 / 熔断；数据源用注入的假 provider）
 ```
 
 ## 文件清单

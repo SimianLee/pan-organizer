@@ -220,6 +220,61 @@ def start_mock():
 
 
 # ---------------------------------------------------------------------------
+# 假"当当"站点：给图书联网补全（bookonline）做端到端测试用
+# ---------------------------------------------------------------------------
+# 真实站点结构照抄：搜索页给一个商品链接，商品页有面包屑「图书 > 小说 > 社会小说」。
+# 故意用 GBK 编码返回，顺带验证解码路径（真实当当就是 GBK）。
+_DD_SEARCH = ('<html><body><div class="list">'
+              '<a href="http://product.dangdang.com/29311943.html">活着</a>'
+              '</div></body></html>')
+_DD_PRODUCT = (
+    '<html><head>'
+    '<title>《活着》余华 著【简介_书评_在线阅读】 - 当当图书</title>'
+    '</head><body>'
+    '<div class="product_wrapper">'
+    '<!-- 面包屑 begin -->'
+    '<div class="breadcrumb" id="breadcrumb" dd_name="顶部面包屑导航">'
+    "<a href='http://book.dangdang.com/' name='__Breadcrumb_pub'><b>图书</b></a>"
+    '<span class="gt">&gt;</span>'
+    "<a href='http://category.dangdang.com/cp01.03.00.00.00.00.html'>小说</a>"
+    '<span class="gt">&gt;</span>'
+    "<a href='http://category.dangdang.com/cp01.03.45.00.00.00.html'>社会小说</a>"
+    '<span class="gt">&gt;</span><span>活着（余华代表作）</span>'
+    '<div class="outlets" style="display:none" id="bread-crumb-outlets">'
+    '<a class="o_icon" href="http://v.dangdang.com/" title="尾品汇">尾品汇</a>'
+    '</div></div></div></body></html>')
+
+
+class FakeDangdangHandler(BaseHTTPRequestHandler):
+    requests = []          # 记录所有请求路径，用来断言"只查了该查的"
+
+    def log_message(self, *a):        # 静音
+        pass
+
+    def do_GET(self):
+        FakeDangdangHandler.requests.append(self.path)
+        if self.path.startswith("/search"):
+            body = _DD_SEARCH
+        elif self.path.startswith("/product/"):
+            body = _DD_PRODUCT
+        else:
+            body = "<html><body>404</body></html>"
+        raw = body.encode("gbk")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=gbk")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+def start_fake_dangdang():
+    FakeDangdangHandler.requests = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeDangdangHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, server.server_address[1]
+
+
+# ---------------------------------------------------------------------------
 # 测试辅助
 # ---------------------------------------------------------------------------
 PASS = 0
@@ -257,6 +312,7 @@ def build_rules():
 
 def main():
     server, tree, port = start_mock()
+    dd_server, dd_port = start_fake_dangdang()
     base_url = f"http://127.0.0.1:{port}/dav"
 
     tmp = os.path.join(ROOT, "tests", "_tmp")
@@ -699,7 +755,82 @@ def main():
           "/我的网盘/书档2/外语学习/2026-05/英语语法入门.pdf" in tree.nodes,
           str(tree.nodes.keys()))
 
+    # ============ v1.6 图书联网补全（bookonline）：只查本地判不出的书 ============
+    print("\n== 26) bookonline：本地判不出的书联网归类，能判出的一律不联网 ==")
+    online_config_path = os.path.join(tmp, "config_online.json")
+    with open(online_config_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "alist": {"base_url": base_url, "username": "u", "password": "p",
+                      "timeout": 10},
+            "options": {"on_conflict": "rename"},
+            "online": {
+                "provider": "dangdang",
+                "timeout": 5,
+                "workers": 1,
+                "delay": 0,
+                "search_url": f"http://127.0.0.1:{dd_port}/search?key={{q}}&act=input",
+                "product_url": f"http://127.0.0.1:{dd_port}/product/{{id}}.html",
+            },
+        }, f, ensure_ascii=False, indent=2)
+    cache_path = os.path.join(tmp, "online_cache.json")
+    if os.path.exists(cache_path):
+        os.remove(cache_path)
+    FakeDangdangHandler.requests = []
+
+    tree.add_dir("/我的网盘/书库3")
+    tree.add_file("/我的网盘/书库3/活着.pdf", 1_000_000)                 # 本地无线索 → 联网
+    tree.add_file("/我的网盘/书库3/Python编程从入门到实践.epub", 900_000)  # 本地已判计算机IT
+    tree.add_file("/我的网盘/书库3/封面图.jpg", 20_000)                   # 非图书
+    code, out = run_cli(["extsort", "--config", online_config_path,
+                         "--path", "/我的网盘/书库3", "--dest", "/我的网盘/书档3",
+                         "--rules", "booksort,bookonline", "--apply", "--verbose"], ROOT)
+    check("bookonline 执行退出码 0", code == 0, out)
+    check("启用提示可见", "联网补全已启用" in out, out)
+    check("成功移动 2 个", "成功移动 2 个" in out, out)
+    check("联网结果落位 文学小说/",
+          "/我的网盘/书档3/文学小说/活着.pdf" in tree.nodes, str(tree.nodes.keys()))
+    check("本地已判定的仍归 计算机IT/",
+          "/我的网盘/书档3/计算机IT/Python编程从入门到实践.epub" in tree.nodes,
+          str(tree.nodes.keys()))
+    check("非图书原地不动", "/我的网盘/书库3/封面图.jpg" in tree.nodes, str(tree.nodes.keys()))
+    check("只查了 1 本（Python 那本没联网）",
+          len(FakeDangdangHandler.requests) == 2, str(FakeDangdangHandler.requests))
+    check("搜索请求用 GBK 编码书名（%BB%EE%D7%C5=活着）",
+          FakeDangdangHandler.requests
+          and "%BB%EE%D7%C5" in FakeDangdangHandler.requests[0],
+          str(FakeDangdangHandler.requests))
+    check("查询结果写入本地缓存", os.path.exists(cache_path), cache_path)
+    if os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            cache = json.load(f)
+        check("缓存内容为 文学小说（来源 dangdang）",
+              (cache.get("titles", {}).get("活着") or {}).get("label") == "文学小说",
+              str(cache.get("titles")))
+    check("汇总提示联网归类数量", "联网补全" in out and "归类成功" in out, out)
+
+    print("\n== 27) bookonline：缓存命中不再联网 + 搜错书时宁可不分类 ==")
+    FakeDangdangHandler.requests = []
+    code, out = run_cli(["extsort", "--config", online_config_path,
+                         "--path", "/我的网盘/书库3", "--dest", "/我的网盘/书档3",
+                         "--rules", "booksort,bookonline", "--apply"], ROOT)
+    check("重跑无操作（已归档的幂等跳过）", "没有需要执行的操作" in out, out)
+    check("重跑零联网请求（缓存命中）",
+          FakeDangdangHandler.requests == [], str(FakeDangdangHandler.requests))
+
+    # 新书：假站点无论查什么书都返回《活着》的商品页 → 相似度守卫应判"搜到的是别的书"
+    tree.add_file("/我的网盘/书库3/三体.epub", 700_000)
+    FakeDangdangHandler.requests = []
+    code, out = run_cli(["extsort", "--config", online_config_path,
+                         "--path", "/我的网盘/书库3", "--dest", "/我的网盘/书档3",
+                         "--rules", "booksort,bookonline", "--apply"], ROOT)
+    check("新书执行退出码 0", code == 0, out)
+    check("确实联了网（1 次搜索 + 1 次商品页）",
+          len(FakeDangdangHandler.requests) == 2, str(FakeDangdangHandler.requests))
+    check("书名对不上 → 宁可不分类，保留 其它图书/",
+          "/我的网盘/书档3/其它图书/三体.epub" in tree.nodes, str(tree.nodes.keys()))
+
     server.shutdown()
+    dd_server.shutdown()
     print(f"\n========== 测试结果：通过 {PASS}，失败 {FAIL} ==========")
     sys.exit(1 if FAIL else 0)
 

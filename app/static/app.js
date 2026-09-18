@@ -7,8 +7,10 @@ const $$ = (s) => document.querySelectorAll(s);
 // 当前 /api/rules 里真实存在的规则 id（白名单）。
 // 恢复旧 state.json / config.last_job 时，不在清单里的历史规则 id
 // （如已移除的 rename_on_conflict 伪规则）会被过滤掉，避免幽灵勾选。
+// 注意：这份清单只是"规则页尚未打开时"的兜底；打开规则页后会用 /api/rules
+// 的真实清单覆盖（见 loadRules），新增规则不必再改这里。
 const RULE_IDS = [
-  "extsort", "category", "by_date", "by_size",
+  "extsort", "category", "booksort", "bookonline", "by_date", "by_size",
   "skip_incomplete",
   "regex_match", "dedupe", "cleanup_empty", "cron",
 ];
@@ -22,6 +24,7 @@ const state = {
   srcPath: "",
   dstPath: "",
   selectedRules: new Set(["extsort", "skip_incomplete"]),
+  restoredRulesRaw: null,  // 上次任务用的规则原始清单（规则页加载后按真实清单重算勾选）
   status: "idle",
   sse: null,
   lastPlan: null,          // 上次任务的计划文件名（页面恢复时预选下拉用）
@@ -129,6 +132,7 @@ async function loadConfig() {
     if (Array.isArray(lj.rules) && lj.rules.length) {
       // 只恢复"当前仍存在且确实可执行"的规则：
       // 过滤掉历史遗留/已移除的 id（如 rename_on_conflict）以及"规划中"的规则
+      state.restoredRulesRaw = lj.rules.slice();
       state.selectedRules = new Set(
         lj.rules.filter(
           id => RULE_IDS.includes(id) && !PLANNED_RULE_IDS.includes(id)));
@@ -142,6 +146,8 @@ async function loadConfig() {
       const rp = $("#regexPattern");
       if (rp) rp.value = cfg.options.regex_pattern;
     }
+    // 图书联网补全（bookonline）设置回填
+    await fillOnlineForm(cfg.online || {});
 
     // —— 上次运行状态恢复（idle 时直接渲染，已结束也展示）——
     if (resp.last_run && resp.last_run.log) {
@@ -327,6 +333,19 @@ $("#dstPath").addEventListener("change", (e) => { state.dstPath = e.target.value
 async function loadRules() {
   try {
     const r = await api("/api/rules");
+    // 用服务端清单刷新白名单与"规划中"清单：以后再新增规则不必改 app.js，
+    // 也顺手修掉"新规则被旧白名单静默丢掉"的问题（booksort/bookonline 就踩过）。
+    RULE_IDS.length = 0;
+    PLANNED_RULE_IDS.length = 0;
+    r.rules.forEach(x => {
+      RULE_IDS.push(x.id);
+      if (x.planned) PLANNED_RULE_IDS.push(x.id);
+    });
+    if (state.restoredRulesRaw) {
+      state.selectedRules = new Set(
+        state.restoredRulesRaw.filter(
+          id => RULE_IDS.includes(id) && !PLANNED_RULE_IDS.includes(id)));
+    }
     const html = r.rules.map(rule => `
       <label class="flex items-start gap-3 p-3 border border-slate-200
                     rounded-md hover:bg-slate-50 cursor-pointer
@@ -964,6 +983,108 @@ async function loadHistory() {
     $("#historyLogs").innerHTML = '<p class="text-red-500">加载失败</p>';
   }
 }
+
+// ---------------------------------------------------------------------------
+// 图书联网补全（bookonline 规则）：表单回填 / 保存 / 试查
+// ---------------------------------------------------------------------------
+let ONLINE_DEFAULTS = null;
+
+async function ensureOnlineDefaults() {
+  if (ONLINE_DEFAULTS) return ONLINE_DEFAULTS;
+  try {
+    const r = await api("/api/online/defaults");
+    ONLINE_DEFAULTS = r.defaults || {};
+  } catch (e) {
+    ONLINE_DEFAULTS = {};
+  }
+  return ONLINE_DEFAULTS;
+}
+
+function setOnlineMsg(text, isErr) {
+  const el = $("#olMsg");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "text-sm self-center " + (isErr ? "text-red-600" : "text-green-600");
+  if (text) setTimeout(() => { if (el.textContent === text) el.textContent = ""; }, 4000);
+}
+
+async function fillOnlineForm(on) {
+  const d = await ensureOnlineDefaults();
+  const dllm = d.llm || {};
+  const llm = on.llm || {};
+  $("#olProvider").value = on.provider || d.provider || "auto";
+  $("#olLimit").value = (on.limit != null) ? on.limit : (d.limit != null ? d.limit : 0);
+  $("#olWorkers").value = on.workers || d.workers || 3;
+  $("#olTimeout").value = on.timeout || d.timeout || 8;
+  $("#olBaseUrl").value = llm.base_url || dllm.base_url || "";
+  $("#olModel").value = llm.model || dllm.model || "";
+  // key 后端只回 "已设置" 标记，前端永远留空 = 不修改
+  const k = $("#olApiKey");
+  k.value = "";
+  k.placeholder = llm.api_key_set ? "留空保持原 key" : "未设置（当当源不需要）";
+}
+
+function collectOnlineForm() {
+  return {
+    online: {
+      provider: $("#olProvider").value,
+      limit: parseInt($("#olLimit").value, 10) || 0,
+      workers: parseInt($("#olWorkers").value, 10) || 3,
+      timeout: parseInt($("#olTimeout").value, 10) || 8,
+      llm: {
+        base_url: $("#olBaseUrl").value.trim(),
+        model: $("#olModel").value.trim(),
+        api_key: $("#olApiKey").value,      // 留空 = 保持原 key 不变
+      },
+    },
+  };
+}
+
+$("#btnOnlineSave").addEventListener("click", async () => {
+  try {
+    await api("/api/config", {
+      method: "POST", body: JSON.stringify(collectOnlineForm()),
+    });
+    setOnlineMsg("✓ 已保存", false);
+  } catch (err) {
+    setOnlineMsg("保存失败: " + err.message, true);
+  }
+});
+
+$("#btnOnlineTest").addEventListener("click", async () => {
+  const title = $("#olTestTitle").value.trim();
+  const out = $("#olTestOut");
+  out.classList.remove("hidden");
+  if (!title) {
+    out.textContent = "请先填一个书名再试查。";
+    return;
+  }
+  const btn = $("#btnOnlineTest");
+  btn.disabled = true;
+  btn.textContent = "查询中…";
+  out.textContent = "查询中…（首次约 1-5 秒）";
+  try {
+    const r = await api("/api/online/test", {
+      method: "POST",
+      body: JSON.stringify({ title, provider: $("#olProvider").value }),
+    });
+    if (r.error) {
+      out.textContent = `✗ 查询失败：${r.error}\n${r.hint || ""}`;
+    } else {
+      out.textContent =
+        `书名      ：${r.title || r.input}\n` +
+        `判定类型  ：${r.label || "未识别（保持「其它图书」）"}\n` +
+        `数据源    ：${r.source || "-"}\n` +
+        `远端分类  ：${r.raw || "-"}\n` +
+        `耗时      ：${r.elapsed}s  ${r.hint || ""}`;
+    }
+  } catch (err) {
+    out.textContent = "✗ 请求失败：" + err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "试查";
+  }
+});
 
 // ---- 启动 ----
 (async () => {

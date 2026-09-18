@@ -127,6 +127,76 @@ def main():
           and sorted(r["id"] for r in rules if r.get("planned")) == ["cron", "dedupe"],
           str([(r["id"], r.get("planned")) for r in rules]))
 
+    print("\n== B2. 图书联网补全接口（bookonline）==")
+    check("规则清单含 booksort / bookonline",
+          "booksort" in ids and "bookonline" in ids, str(ids))
+
+    code, j = jget("/api/online/defaults")
+    check("/api/online/defaults 200", code == 200, str(code))
+    check("返回默认配置（provider=auto）",
+          ((j or {}).get("defaults") or {}).get("provider") == "auto", str(j)[:200])
+    check("返回三个数据源选项",
+          [p.get("id") for p in ((j or {}).get("providers") or [])]
+          == ["auto", "dangdang", "llm"], str(j)[:200])
+    check("返回类型清单（含 文学小说/漫画）",
+          "文学小说" in ((j or {}).get("labels") or [])
+          and "漫画" in ((j or {}).get("labels") or []), str(j)[:200])
+
+    # API key 不能回传明文；前端留空 = 保持原 key
+    cfg = web.load_config()
+    cfg["online"] = {"provider": "llm", "llm": {"api_key": "SECRET-KEY"}}
+    web.save_config(cfg)
+    code, j = jget("/api/config")
+    llm_view = (((j or {}).get("online") or {}).get("llm") or {})
+    check("/api/config 不回传 api_key 明文",
+          not llm_view.get("api_key") and llm_view.get("api_key_set"), str(llm_view))
+    code, j = jget("/api/state")
+    check("/api/state 同样遮罩 api_key",
+          not ((((j or {}).get("config") or {}).get("online") or {})
+               .get("llm") or {}).get("api_key"), str(j)[:200])
+    jpost("/api/config", {"online": {"provider": "dangdang", "workers": 2,
+                                     "llm": {"api_key": ""}}})
+    cfg2 = web.load_config()
+    check("api_key 留空不被清掉",
+          cfg2["online"]["llm"]["api_key"] == "SECRET-KEY", str(cfg2.get("online")))
+    check("provider / workers 已更新",
+          cfg2["online"]["provider"] == "dangdang"
+          and cfg2["online"]["workers"] == 2, str(cfg2.get("online")))
+
+    # 试查接口：用注册的假数据源，不联网
+    web.book_online.PROVIDERS["fake_smoke"] = (
+        lambda t, c, to, labels=None: "图书 > 小说 > 社会小说")
+    cfg3 = web.load_config()
+    cfg3["online"] = {"provider": "fake_smoke", "delay": 0, "timeout": 2, "workers": 1}
+    web.save_config(cfg3)
+    code, j = jpost("/api/online/test", {"title": "《活着》.epub"})
+    check("试查返回 200 且带上类型与来源",
+          code == 200 and (j or {}).get("label") == "文学小说"
+          and (j or {}).get("source") == "fake_smoke", f"{code} {j}")
+    check("试查回显清洗后的书名", (j or {}).get("title") == "活着", str(j))
+    check("试查给出归类提示", "文学小说" in ((j or {}).get("hint") or ""), str(j))
+    code, j = jpost("/api/online/test", {"title": ""})
+    check("空书名 → 400 且带提示", code == 400 and (j or {}).get("error"), f"{code} {j}")
+
+    def _boom(t, c, to, labels=None):
+        raise OSError("模拟网络不通")
+    web.book_online.PROVIDERS["fake_boom"] = _boom
+    cfg4 = web.load_config()
+    cfg4["online"] = {"provider": "fake_boom", "delay": 0, "timeout": 2, "workers": 1}
+    web.save_config(cfg4)
+    code, j = jpost("/api/online/test", {"title": "三体"})
+    check("数据源故障 → 仍 200 不 500，且如实回传失败原因",
+          code == 200 and (j or {}).get("label") is None
+          and "模拟网络不通" in ((j or {}).get("error") or ""),
+          f"{code} {j}")
+    check("失败原因的提示语面向用户可读",
+          "查询失败" in ((j or {}).get("hint") or ""), str(j))
+
+    # 还原配置，避免影响后续用例
+    cfg5 = web.load_config()
+    cfg5.pop("online", None)
+    web.save_config(cfg5)
+
     code, j = jget("/api/status")
     check("/api/status 200 & idle", code == 200 and j.get("status") == "idle", f"{code} {j}")
 

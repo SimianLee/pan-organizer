@@ -75,6 +75,13 @@ def _safe_parse_headers(fp, _class=http.client.HTTPMessage):
 
 http.client.parse_headers = _safe_parse_headers
 
+# 图书联网二次分类（v1.6）：bookonline 规则用。放在 app/ 下的独立模块里，
+# 主程序 import 失败时只降级（联网功能不可用），不影响其它功能。
+try:
+    import book_online
+except ImportError:                                    # pragma: no cover
+    book_online = None
+
 # Windows 控制台可能默认 GBK，统一转 UTF-8 输出，避免中文报错
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -84,7 +91,7 @@ except Exception:
 
 DAV = "{DAV:}"
 # 版本号唯一来源：README 徽标 / Dockerfile label / Web /api/health / 页面页脚都引用它
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 APP_NAME = f"pan-organizer/{APP_VERSION}"
 
 
@@ -1111,9 +1118,72 @@ def booksort_classify(name, ext):
     for label, pattern in BOOK_RULES_COMPILED:
         if pattern.search(name):
             return label
-    # 书名无类型线索（如《活着》）→ 兜底目录，留人工/LLM 二次分类
+    # 书名无类型线索（如《活着》）→ 兜底目录，留人工/联网二次分类
     return BOOK_UNCLASSIFIED
 
+
+# ---- 联网二次分类（bookonline 规则，v1.6）----
+# 本地关键词命中不了的（其它图书）才联网查；查询源与缓存见 app/book_online.py。
+# 两个模块分工：book_online 负责"取回远端分类文本"，这里负责"文本 → 本地类型目录"，
+# 用的是同一套 BOOK_RULES，保证两种来源口径一致。
+BOOK_LABELS = [label for label, _ in BOOK_RULES] + [COMIC_DIR, BOOK_UNCLASSIFIED]
+_BOOK_LABEL_SET = set(BOOK_LABELS)
+_COMIC_TEXT_RE = re.compile(r"动漫|漫画|连环画|画集|画册")
+
+
+def booksort_match_text(text):
+    """
+    远端返回的分类文本 → 本地类型目录名（None = 判不出来）。
+
+    兼容两种形态：
+      1) 面包屑路径 "图书 > 小说 > 社会小说"：**按段从左到右**，取第一个能匹配的段。
+         左段是站点大类，比右段更权威 —— 否则「小说 > 历史小说」会被"历史"规则
+         抢走，归进历史传记。
+      2) LLM 自由文本 "文学小说" / "这本书属于小说"：先精确匹配类型名，再走关键词。
+    """
+    if not text:
+        return None
+    t = str(text).strip()
+    if t in _BOOK_LABEL_SET:
+        return t
+    segs = [s.strip() for s in re.split(r"[>\n\r\t|,，、；;]+", t) if s.strip()]
+    # 先看有没有直接点明类型名 / 漫画的段
+    for s in segs:
+        if s in _BOOK_LABEL_SET:
+            return s
+    for s in segs:
+        if _COMIC_TEXT_RE.search(s):
+            return COMIC_DIR
+    # 再按段顺序跑关键词规则（段优先，不是整串匹配）
+    for s in segs:
+        for label, pattern in BOOK_RULES_COMPILED:
+            if pattern.search(s):
+                return label
+    return None
+
+
+def build_online_classifier(cfg, provider=None, limit=None, refresh=False,
+                            cache_path=None, verbose=False):
+    """
+    按 config.json 的 "online" 段构造联网分类器；模块缺失/配置非法时返回 None
+    （调用方据此走纯本地逻辑，绝不因为联网功能抛错中断整理）。
+    """
+    if book_online is None:
+        print("  [联网] 未找到 book_online 模块，联网补全不可用（按本地规则继续）")
+        return None
+    ocfg = (cfg or {}).get("online") or {}
+    if provider:
+        ocfg = dict(ocfg, provider=provider)
+    try:
+        clf = book_online.OnlineClassifier(
+            ocfg, booksort_match_text, cache_path=cache_path, limit=limit,
+            refresh=refresh, log=print)
+    except Exception as e:                             # 配置写错也不该炸任务
+        print(f"  [联网] 初始化失败，按本地规则继续：{e}")
+        return None
+    clf.labels = BOOK_LABELS
+    clf.verbose = verbose
+    return clf
 
 
 # ---- v2 规则：按文件大小归档（四档）----
@@ -1152,7 +1222,7 @@ def date_folder(mtime):
 def extsort_plan(client, cfg, root, dest, depth,
                  skip_exts=None, skip_noext=False, only_exts=None,
                  min_mb=None, max_mb=None,
-                 enabled_rules=None, regex_pattern=None):
+                 enabled_rules=None, regex_pattern=None, online=None):
     """
     自动按规则归档：扫描 root 下所有文件，按勾选的规则（按后缀/按大类/按日期/按大小
     可嵌套拼接目录）归入 dest/<目录>/。支持正则筛选。
@@ -1161,6 +1231,8 @@ def extsort_plan(client, cfg, root, dest, depth,
       ext_stats: {ext: {"count","size","dst_dir","already"}}  用于汇总展示
       stats: {"files","hit","skip_same","skip_filter","excluded","unreadable"}
     enabled_rules: 启用的规则 id 集合（extsort/category/by_date/by_size/regex_match）
+    online: 联网二次分类器（bookonline 规则用，见 build_online_classifier）；
+            None = 纯本地分类（默认，零网络请求）
     """
     root = norm_path(root)
     dest = norm_path(dest)
@@ -1192,8 +1264,44 @@ def extsort_plan(client, cfg, root, dest, depth,
     stats = {
         "files": len(files), "hit": 0, "skip_same": 0, "renamed": 0,
         "skip_filter": 0, "excluded": skipped_excluded, "skip_size": 0,
-        "skip_nonbook": 0,
+        "skip_nonbook": 0, "online_cand": 0, "online_hit": 0,
     }
+
+    # ---- 联网二次分类预扫：只查"本地判为其它图书"的书，结果按文件名建表 ----
+    # 提前批量查（并发）比在主循环里逐本查快得多；查询结果同时落本地缓存，
+    # 重跑同目录零请求。pre-scan 复用主循环的过滤条件，避免查了却不搬。
+    online_map = {}
+    if online is not None:
+        cand = []
+        for ent in files:
+            if BAK_MARK in ent.name:
+                continue
+            e = ext_of(ent.name)
+            if booksort_classify(ent.name, e) != BOOK_UNCLASSIFIED:
+                continue                       # 非图书 或 本地已能归类 → 不联网
+            if e in skip_exts or (not e and skip_noext):
+                continue
+            if only_exts and e not in only_exts:
+                continue
+            if min_b is not None and (ent.size or 0) < min_b:
+                continue
+            if max_b is not None and (ent.size or 0) > max_b:
+                continue
+            if "regex_match" in enabled_rules and regex is not None \
+                    and not regex.search(ent.name):
+                continue
+            cand.append(ent.name)
+        stats["online_cand"] = len(cand)
+        if cand:
+            online_map = online.classify_many(cand)
+            if not online.verbose:
+                s = online.stats
+                err = f"，出错 {s['error']} 次" if s["error"] else ""
+                print(f"  [联网] 查询完成：{s['queries']} 次新查询，命中 {s['hit']} 个，"
+                      f"未识别 {s['miss']} 个，缓存直接命中 {s['cache_hit']} 个{err}",
+                      flush=True)
+        else:
+            print("  [联网] 没有需要联网判定的图书（本地关键词已全部命中）", flush=True)
 
     for ent in files:
         ext = ext_of(ent.name)
@@ -1233,6 +1341,10 @@ def extsort_plan(client, cfg, root, dest, depth,
                 # 非图书/漫画文件：booksort 规则不碰，原地保留
                 stats["skip_nonbook"] += 1
                 continue
+            if bcat == BOOK_UNCLASSIFIED and online_map.get(ent.name):
+                # 本地没线索 → 用预扫到的联网结果（bookonline 规则）
+                bcat = online_map[ent.name]
+                stats["online_hit"] += 1
             segs.append(bcat)
         elif "category" in enabled_rules:
             segs.append(category_of(ext))
@@ -1555,11 +1667,33 @@ def cmd_extsort(args):
     if only_exts:
         print(f"只整理后缀：{', '.join(sorted(only_exts))}")
 
+    # ---- 联网二次分类器（bookonline 规则，v1.6）----
+    # 只有在 booksort 同时启用时才有意义：bookonline 只负责把"其它图书"进一步细化。
+    online = None
+    if "bookonline" in enabled_rules:
+        if "booksort" not in enabled_rules:
+            print("[提示] 联网补全（bookonline）只在同时启用 booksort 时生效，本次忽略。")
+        elif book_online is None:
+            print("[提示] 未找到 book_online 模块，联网补全不可用，按本地规则继续。")
+        else:
+            online = build_online_classifier(
+                cfg, provider=args.online_provider, limit=args.online_limit,
+                refresh=args.online_refresh, verbose=args.verbose,
+                cache_path=os.path.join(
+                    os.path.dirname(os.path.abspath(args.config)), "online_cache.json"))
+            if online is not None:
+                ocfg = online.cfg
+                print(f"联网补全已启用：数据源 {ocfg['provider']}，并发 {ocfg['workers']}，"
+                      f"超时 {ocfg['timeout']}s"
+                      f"{'，本次最多查 %d 本' % online.limit if online.limit else ''}"
+                      f"；只对本地判为「{BOOK_UNCLASSIFIED}」的图书联网")
+
     ops, ext_stats, stats = extsort_plan(
         client, cfg, root, dest, args.depth,
         skip_exts=skip_exts, skip_noext=args.skip_noext, only_exts=only_exts,
         min_mb=args.min_mb, max_mb=args.max_mb,
         enabled_rules=enabled_rules, regex_pattern=args.regex_pattern,
+        online=online,
     )
     if enabled_rules != {"extsort"} and enabled_rules != {"extsort", "skip_incomplete"}:
         print(f"启用的规则：{', '.join(sorted(enabled_rules))}"
@@ -1585,6 +1719,10 @@ def cmd_extsort(args):
         if stats.get("skip_nonbook"):
             skip_reason.append(f"非图书/漫画文件（booksort 规则不搬动）{stats['skip_nonbook']} 个")
         print(f"未列入计划：{'，'.join(skip_reason)}")
+    if stats.get("online_cand"):
+        print(f"联网补全：{stats['online_cand']} 个书名无本地线索 → 联网判定，"
+              f"其中 {stats['online_hit']} 个已归类成功"
+              f"（其余仍归 {BOOK_UNCLASSIFIED}，可稍后重跑或改用手工归类）")
 
     # ---- 目标目录原本条目检测（防覆盖可见性）----
     # 把"目标目录原本有什么"明示给用户，并结合本次策略给出结论：
@@ -1873,10 +2011,19 @@ def main():
                        help="启用的规则 id（逗号分隔，可组合嵌套目录）："
                             "extsort按后缀 / skip_incomplete跳过未完成文件 / category按大类 / "
                             "booksort图书漫画按书名类型归类（漫画/小说/历史/医学…，非图书不动）/ "
-                            "by_date按日期 / by_size按大小 / regex_match正则筛选 / "
+                            "bookonline图书联网补全（需与 booksort 同用，只补「其它图书」那部分）"
+                            " / by_date按日期 / by_size按大小 / regex_match正则筛选 / "
                             "cleanup_empty清理空目录。默认 extsort,skip_incomplete")
     p_ext.add_argument("--regex-pattern", default=None,
                        help="启用 regex_match 时的正则表达式：只整理文件名匹配的文件")
+    p_ext.add_argument("--online-provider", default=None, choices=["auto", "dangdang", "llm"],
+                       help="联网补全（bookonline）的数据源，覆盖 config.json 的 online.provider："
+                            "auto=先 llm（配了 key 才用）再 dangdang / dangdang=当当分类（免费，默认）/ "
+                            "llm=OpenAI 兼容接口（准确率最高，需在 config 里配 api_key）")
+    p_ext.add_argument("--online-limit", type=int, default=None,
+                       help="联网补全单次最多查询多少个书名（默认取 config 的 online.limit，0=不限）")
+    p_ext.add_argument("--online-refresh", action="store_true",
+                       help="忽略本地缓存 data/online_cache.json，强制重新联网查询")
 
     args = parser.parse_args()
     # 统一兜底：任何未预期异常都在日志里留下醒目标记 + 完整堆栈，
