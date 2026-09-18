@@ -91,7 +91,7 @@ except Exception:
 
 DAV = "{DAV:}"
 # 版本号唯一来源：README 徽标 / Dockerfile label / Web /api/health / 页面页脚都引用它
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 APP_NAME = f"pan-organizer/{APP_VERSION}"
 
 
@@ -299,12 +299,16 @@ class WebDAVClient:
             href_path = urllib.parse.unquote(p.path or raw)
             norm = self._norm_path(href_path)
 
+            # 先剥掉 base_url 的路径前缀（如 /dav），再比较“目录自身”。
+            # 顺序不能反：alist 的 href 带前缀（/dav/xxx），若拿带前缀的路径
+            # 与请求路径（/xxx）比较永不相等，“跳过自身”失效——浏览器里每个
+            # 目录都会多出一个与自己同名的幻影子目录（2026-09-18 修）。
+            if self.base_path and norm.startswith(self.base_path):
+                norm = norm[len(self.base_path):] or "/"
+
             # 跳过“目录自身”那一条记录（PROPFIND Depth:1 会包含自身）
             if norm == req_norm:
                 continue
-            # 剥掉 base_url 的路径前缀（如 /dav）
-            if self.base_path and norm.startswith(self.base_path):
-                norm = norm[len(self.base_path):] or "/"
 
             is_dir = False
             size = None

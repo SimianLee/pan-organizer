@@ -5,7 +5,7 @@ FROM python:3.12-slim
 
 LABEL maintainer="pan-organizer" \
       description="网盘自动整理工具 · Web UI 版本" \
-      version="1.6.1"
+      version="1.6.2"
 
 # 时区：官方 python:slim 镜像里没有 tzdata，compose 里设了 TZ=Asia/Shanghai 也不会生效，
 # 日志时间戳会是 UTC（比本地早 8 小时），排查问题时会误判时间。

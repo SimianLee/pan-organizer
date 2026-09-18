@@ -120,7 +120,11 @@ class MockHandler(BaseHTTPRequestHandler):
 
         body = ['<?xml version="1.0" encoding="utf-8"?>', '<d:multistatus xmlns:d="DAV:">']
         for item_path, node in items:
-            href = urllib.parse.quote(item_path, safe="/")
+            # 真实 alist 的 href 带 /dav 前缀（如 /dav/我的网盘/xxx），
+            # 且 Depth:1 响应包含目录自身那条（items[0]）——按真实行为模拟，
+            # 否则"跳过自身/剥前缀"的解析逻辑测不到真场景
+            # （2026-09-18 曾因 href 无前缀漏测：幻影同名子目录 bug 上线）。
+            href = "/dav" + urllib.parse.quote(item_path, safe="/")
             coll = "<d:collection/>" if node["is_dir"] else ""
             length = "" if node["is_dir"] else str(node["size"])
             name = item_path.rstrip("/").rsplit("/", 1)[-1]
@@ -324,6 +328,20 @@ def main():
                    "options": {"on_conflict": "rename"}}, f, ensure_ascii=False, indent=2)
     with open(rules_path, "w", encoding="utf-8") as f:
         json.dump(build_rules(), f, ensure_ascii=False, indent=2)
+
+    print("== 0) list_dir：href 带 /dav 前缀时也不出现幻影自身条目 ==")
+    cfg_for_probe = json.load(open(config_path, encoding="utf-8"))
+    sys.path.insert(0, os.path.join(ROOT, "app"))
+    import pan_organizer as _po
+    _client = _po.WebDAVClient(cfg_for_probe["alist"]["base_url"], "u", "p", timeout=10)
+    _entries = _client.list_dir("/")
+    check("根目录列表不含幻影 / 自身",
+          "/" not in [e.path for e in _entries], str([e.path for e in _entries]))
+    _entries2 = _client.list_dir("/我的网盘")
+    check("子目录列表不含幻影自身",
+          "/我的网盘" not in [e.path for e in _entries2], str([e.path for e in _entries2]))
+    check("子目录真实子夹仍可见",
+          any(e.path == "/我的网盘/下载" for e in _entries2), str([e.path for e in _entries2]))
 
     print("== 1) check：测试连接与挂载点列表 ==")
     code, out = run_cli(["check", "--config", config_path], ROOT)
