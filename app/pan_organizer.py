@@ -91,7 +91,7 @@ except Exception:
 
 DAV = "{DAV:}"
 # 版本号唯一来源：README 徽标 / Dockerfile label / Web /api/health / 页面页脚都引用它
-APP_VERSION = "1.6"
+APP_VERSION = "1.6.1"
 APP_NAME = f"pan-organizer/{APP_VERSION}"
 
 

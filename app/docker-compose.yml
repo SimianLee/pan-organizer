@@ -19,8 +19,9 @@ services:
       # 时区（影响日志时间戳显示）
       - TZ=Asia/Shanghai
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://localhost:6060/api/health').status)"]
+      test: ["CMD", "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://localhost:6060/api/health', timeout=10).status)"]
       interval: 30s
-      timeout: 5s
+      # 冷启动 Python 探测在 J1900 上本身就慢，5s 会周期性超时（DSM 黄色警告）
+      timeout: 15s
       retries: 3
-      start_period: 10s
+      start_period: 30s
